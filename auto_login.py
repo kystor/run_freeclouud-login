@@ -7,7 +7,7 @@ from seleniumbase import SB
 import ddddocr
 
 # ==========================================
-# 1. 网站配置区域
+# 1. 网站配置区域 (保存所有需要用到的网页元素定位器)
 # ==========================================
 CONFIG = {
     "target_url": "https://run.freecloud.ltd/login",
@@ -17,12 +17,12 @@ CONFIG = {
     "captcha_input_selector": "#captcha_allow_login_email_captcha", 
     "login_btn_selector": 'button[type="submit"]', 
     
-    # 🌟 新增：用户中心验证元素的定位器
+    # 用户中心验证元素的定位器
     "user_center_selector": 'a[href="clientarea"]', 
     
     "sign_in_url": 'https://run.freecloud.ltd/addons?_plugin=5&_controller=index&_action=index', 
     "sign_in_btn_selector": 'button[onclick="showMathVerification()"]', 
-    "math_question_selector": '#mathQuestion',                           
+    "math_question_selector": '#mathQuestion',                             
     "math_input_selector": '#userAnswer',                                
     "verify_btn_selector": 'button[onclick="checkAnswer()"]',            
     "popup_content_selector": ".layui-layer-content", 
@@ -30,15 +30,17 @@ CONFIG = {
     "points_balance_selector": "div.alert-success span", 
     
     "server_list_url": "https://run.freecloud.ltd/service?groupid=305", 
-    "server_checkbox_selector": '.row-checkbox',               
+    "server_checkbox_selector": '.row-checkbox',                
     "list_renew_btn_selector": '#readBtn',                     
     "confirm_renew_btn_selector": '.xfSubmit',                 
     "order_pay_btn_selector": '#payamount',                    
     "modal_pay_btn_selector": 'button.pay-now'                 
 }
 
+# 创建保存截图的文件夹，如果不存在就自动创建
 os.makedirs("screenshots", exist_ok=True)
 
+# 截图辅助函数：方便我们在程序运行出错时查看当时的网页状态
 def take_screenshot(sb, step_name, username="system"):
     safe_name = username.replace("@", "_").replace(".", "_")
     filepath = f"screenshots/{safe_name}_{step_name}.png"
@@ -49,8 +51,9 @@ def take_screenshot(sb, step_name, username="system"):
         print(f"    ⚠️ 截图失败 ({filepath}): {e}")
 
 # ==========================================
-# 2. 绕过辅助函数 
+# 2. 绕过辅助函数 (处理 Cloudflare 等人机验证)
 # ==========================================
+# 检测是否遇到了 CF 5秒盾拦截页面
 def is_cloudflare_interstitial(sb) -> bool:
     try:
         page_source = sb.get_page_source()
@@ -68,6 +71,7 @@ def is_cloudflare_interstitial(sb) -> bool:
     except:
         return False
 
+# 尝试自动绕过 CF 5秒盾
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
     print("    🛡️ 检测到 CF 5秒盾，准备破除...")
     for attempt in range(max_attempts):
@@ -83,6 +87,7 @@ def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
         time.sleep(3)
     return False
 
+# 处理 Turnstile 验证码验证
 def handle_turnstile_verification(sb) -> bool:
     try:
         cookie_btn = 'button[data-cky-tag="accept-button"]'
@@ -92,6 +97,7 @@ def handle_turnstile_verification(sb) -> bool:
     except:
         pass
 
+    # 将验证码滚动到视口中央
     sb.execute_script('''
         try {
             var t = document.querySelector('.cf-turnstile') || 
@@ -150,7 +156,7 @@ def handle_turnstile_verification(sb) -> bool:
     return verified
 
 # ==========================================
-# 3. 单个账号的处理流程
+# 3. 单个账号的处理流程 (登录、签到、续费)
 # ==========================================
 def process_single_account(username, password):
     print(f"\n==========================================")
@@ -190,12 +196,11 @@ def process_single_account(username, password):
 
         try:
             # ==========================================
-            # 🌟 登录模块（新增：用户中心验证及重试1次后退出机制）
+            # 🌟 登录模块
             # ==========================================
             ocr = ddddocr.DdddOcr(show_ad=False)
             login_success = False 
             
-            # 【修改点】：range(2) 意味着总共执行 2 次（第0次是首登，第1次是重试）
             for login_attempt in range(2):
                 captcha_text = ""
                 
@@ -241,14 +246,14 @@ def process_single_account(username, password):
                 print(f"    ▶ 第 {login_attempt+1} 次发起登录请求，等待页面跳转验证...")
                 time.sleep(5) # 给网页充分的跳转和加载时间
                 
-                # 🌟 【核心修改】：精准验证“用户中心”元素是否存在
+                # 精准验证“用户中心”元素是否存在
                 if sb.is_element_present(CONFIG['user_center_selector']):
                     print(f"    ✅ 登录成功！已精准检测到【用户中心】标志。")
                     take_screenshot(sb, "04_登录成功_用户中心页面", username)
                     login_success = True
-                    break # 登录成功，彻底跳出大循环，继续执行后续签到操作
+                    break # 登录成功，跳出循环
                 
-                # 如果没有检测到“用户中心”，分析失败原因
+                # 失败原因分析
                 current_page_source = sb.get_page_source()
                 if "图形验证码有误" in current_page_source or "验证码错误" in current_page_source:
                     print(f"    ❌ 失败原因：网站提示验证码有误（机器识别可能出错）。")
@@ -259,13 +264,11 @@ def process_single_account(username, password):
                 
                 take_screenshot(sb, f"Error_登录失败第{login_attempt+1}次", username)
                 
-                # 🌟 【核心修改】：判断是不是已经重试了 1 次（即 login_attempt 达到了 1）
+                # 错误重试限制退出
                 if login_attempt == 1:
                     print("    🚨 致命警告：重新登录失败已达 1 次，直接强行退出整个程序！")
-                    # 直接终止并退出整个 Python 脚本程序
                     sys.exit(1) 
 
-            # 为了代码健壮性，兜底判断
             if not login_success:
                 print("    🚨 登录流程未成功，跳过后续所有操作。")
                 return 
@@ -290,6 +293,7 @@ def process_single_account(username, password):
                 math_expr = question_text.replace("请计算：", "").replace("=", "").strip()
                 result = eval(math_expr)
                 
+                # 如果遇到小数，刷新重新获取题目
                 if isinstance(result, float) and not result.is_integer():
                     sb.refresh() 
                     time.sleep(3)
@@ -306,15 +310,25 @@ def process_single_account(username, password):
                 
                 take_screenshot(sb, "07_签到弹窗提示结果", username)
                 
+                # 等待系统提示弹窗并获取文字
                 sb.wait_for_element(CONFIG['popup_content_selector'], timeout=5)
                 popup_msg = sb.get_text(CONFIG['popup_content_selector'])
                 print(f"    🔔 签到系统提示: 【{popup_msg}】")
                 
+                # 关闭弹窗
                 sb.click(CONFIG['popup_confirm_btn_selector'])
                 time.sleep(2) 
                 
-                take_screenshot(sb, "08_关闭弹窗后页面", username)
+                # ----------------------------------------------------
+                # 🛠️ 关键修复：强制刷新页面以同步服务端的最新积分
+                # ----------------------------------------------------
+                print("    🔄 正在刷新页面以同步最新积分状态...")
+                sb.refresh()  # 强制刷新当前页面
+                time.sleep(4) # 等待页面完全加载，确保新数据出现
                 
+                take_screenshot(sb, "08_刷新后重新获取页面", username)
+                
+                # 重新去获取页面上的积分元素
                 try:
                     balance_text = sb.get_text(CONFIG['points_balance_selector'])
                     print(f"    💰 当前账户原始信息: {balance_text}")
@@ -383,9 +397,7 @@ def process_single_account(username, password):
                     except Exception as e:
                         pass
                     
-                    # ==========================================
-                    # 🌟 最终闭环：重返签到中心核对积分
-                    # ==========================================
+                    # 最终闭环：重返签到中心核对积分
                     print("\n>>> 🔄 续费完成，返回签到中心查看最新积分...")
                     sb.open(CONFIG['sign_in_url'])
                     time.sleep(4)
@@ -415,15 +427,18 @@ def process_single_account(username, password):
 # ==========================================
 def main():
     print("🚀 自动化任务启动...")
+    # 获取环境变量里面的账号密码信息
     accounts_str = os.environ.get("acount")
     
     if not accounts_str:
         print("⚠️ 未获取到名为 'acount' 环境变量！")
         return
 
+    # 按逗号切割多个账号
     account_list = accounts_str.split(',')
     print(f"📋 共检测到 {len(account_list)} 个账号。")
     
+    # 循环处理每一个账号
     for item in account_list:
         item = item.strip()
         if ':' in item:
@@ -436,5 +451,6 @@ def main():
             
     print("\n🏁 所有队列任务已全部执行完成！")
 
+# 这是 Python 程序的标准启动点
 if __name__ == "__main__":
     main()
