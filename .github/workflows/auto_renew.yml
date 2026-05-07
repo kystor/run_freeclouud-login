@@ -21,57 +21,71 @@ jobs:
 
       - name: 安装 Python 依赖包
         run: |
-          # 屏蔽 pip 安装过程的杂乱信息，全部写入日志文件
+          # 安装需要的包并隐藏繁杂的输出
           pip install seleniumbase ddddocr PyAutoGUI >> init_env.log 2>&1
 
       - name: 智能解析节点并启动代理核心
         env:
           proxy: ${{ secrets.PROXY }}
         run: |
-          # 1. 以后台且静默的方式下载和启动 Subconverter（节点转换器）
+          # 1. 下载并启动节点转换器
           wget -qO sub.tar.gz https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz >> init_env.log 2>&1
           tar -zxf sub.tar.gz >> init_env.log 2>&1
           chmod +x subconverter/subconverter
           nohup ./subconverter/subconverter > sub.log 2>&1 &
 
-          # 2. 静默下载并准备 Mihomo（代理核心）
+          # 2. 下载代理核心 (Mihomo)
           wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz >> init_env.log 2>&1
           gunzip mihomo.gz >> init_env.log 2>&1
           chmod +x mihomo
 
           sleep 3
 
-          # 3. 校验密钥是否填写，错误信息只存入日志
           if [ -z "$proxy" ]; then
-            echo "❌ 严重错误：未提取到节点链接，请检查 GitHub Secrets" >> init_env.log 2>&1
+            echo "❌ 未提取到节点链接" >> init_env.log 2>&1
             exit 1
           fi
 
-          # 4. 使用 Python 脚本对节点 URL 进行编码，屏蔽不必要的系统信息输出
-          cat << 'EOF' > url_encode.py
-          import urllib.parse
+          # ================= 【修复核心部分】 =================
+          
+          # 3. 使用 Python 将节点链接安全地写入本地文本文件 (node.txt)
+          cat << 'EOF' > make_node_file.py
           import os
-          url = os.environ.get('proxy', '').strip()
-          print(urllib.parse.quote(url, safe=''))
+          with open('node.txt', 'w', encoding='utf-8') as f:
+              f.write(os.environ.get('proxy', '').strip())
           EOF
-          ENCODED_PROXY=$(python -u url_encode.py)
+          # 运行这段 Python 代码
+          python -u make_node_file.py
 
-          # 5. 请求转换节点格式，将配置保存为 config.yaml，报错信息丢进日志
-          curl -s "http://127.0.0.1:25500/sub?target=clash&url=${ENCODED_PROXY}" > config.yaml 2>> init_env.log
+          # 4. 在后台启动一个本地的微型 Web 服务器，端口设为 8080
+          python -m http.server 8080 > http.log 2>&1 &
+          HTTP_PID=$!
+          sleep 2
 
-          # 检查配置是否生成成功
+          # 5. 请求转换器去下载我们本地 8080 端口上的 node.txt 
+          # URL 编码后的 http://127.0.0.1:8080/node.txt 就是下面这串字符
+          curl -s "http://127.0.0.1:25500/sub?target=clash&url=http%3A%2F%2F127.0.0.1%3A8080%2Fnode.txt" > config.yaml 2>> init_env.log
+          
+          # 解析完毕后，关掉本地微型服务器以节省系统资源
+          kill $HTTP_PID
+          
+          # ==================================================
+
+          # 6. 检查代理配置文件是否成功生成
           if ! grep -q "proxies:" config.yaml; then
-              echo "❌ 节点解析失败！请检查您的节点链接格式" >> init_env.log 2>&1
+              echo "❌ 节点解析依然失败！" >> init_env.log 2>&1
+              # 如果失败，把生成的错误文件写入日志供日后排查
+              cat config.yaml >> init_env.log 2>&1
               exit 1
           fi
 
-          # 6. 静默修改代理端口为 10808
+          # 7. 强制将本地代理端口绑定为 10808
           sed -i '/^mixed-port:/d' config.yaml
           sed -i '/^port:/d' config.yaml
           sed -i '/^socks-port:/d' config.yaml
           echo -e "\nmixed-port: 10808" >> config.yaml
 
-          # 7. 在后台启动代理客户端，日志独立存放
+          # 8. 后台启动 Mihomo 接管网络
           nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
           sleep 5
 
@@ -82,15 +96,14 @@ jobs:
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          # 静默测试代理连通性，如果失败则直接退出，排查时可去下载 proxy.log 查看
+          # 测试连通性
           curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || exit 1
           
-          # 静默安装虚拟屏幕所需环境，避免输出大段 apt-get 获取进度
+          # 安装虚拟屏幕
           sudo apt-get update >> init_env.log 2>&1
           sudo apt-get install -y xvfb fonts-noto-cjk >> init_env.log 2>&1
           
-          # 【唯一输出到控制台的步骤】
-          # 使用 -u 参数保证 Python 实时输出日志。不屏蔽此处输出，便于你直接在控制台监控业务进展
+          # 启动你的核心脚本（这里保留了你的 -u 参数以防日志截断）
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行日志与截图
