@@ -8,7 +8,6 @@ on:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    
     timeout-minutes: 10
 
     steps:
@@ -22,64 +21,79 @@ jobs:
 
       - name: 安装 Python 依赖包
         run: |
-          pip install seleniumbase ddddocr PyAutoGUI > init_env.log 2>&1
+          # 屏蔽 pip 安装过程的杂乱信息，全部写入日志文件
+          pip install seleniumbase ddddocr PyAutoGUI >> init_env.log 2>&1
 
-      - name: 🚀 智能解析节点并启动 Hysteria2
+      - name: 智能解析节点并启动代理核心
         env:
           proxy: ${{ secrets.PROXY }}
         run: |
-          echo ">>> 正在下载 Hysteria2 客户端..."
-          wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 || { echo "❌ 下载失败！"; exit 1; }
-          chmod +x hysteria-linux-amd64
-          
-          echo ">>> 正在解析 PROXY 节点链接..."
-          # 【修复：加上 || true 防止因为链接里少参数而导致脚本 1 秒闪退】
-          AUTH=$(echo "$proxy" | sed -n 's|.*://\([^@]*\)@.*|\1|p' || true)
-          SERVER=$(echo "$proxy" | sed -n 's|.*@\([^/?#]*\).*|\1|p' || true)
-          SNI=$(echo "$proxy" | grep -oP 'sni=\K[^&#]*' || true)
-          
-          # 检查是不是根本没填密钥
-          if [ -z "$SERVER" ]; then
-            echo "❌ 严重错误：提取不到服务器地址！"
-            echo "👉 请立刻去 GitHub 仓库的 Settings -> Secrets and variables -> Actions 中，检查是否漏填了 PROXY 密钥！"
+          # 1. 以后台且静默的方式下载和启动 Subconverter（节点转换器）
+          wget -qO sub.tar.gz https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz >> init_env.log 2>&1
+          tar -zxf sub.tar.gz >> init_env.log 2>&1
+          chmod +x subconverter/subconverter
+          nohup ./subconverter/subconverter > sub.log 2>&1 &
+
+          # 2. 静默下载并准备 Mihomo（代理核心）
+          wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz >> init_env.log 2>&1
+          gunzip mihomo.gz >> init_env.log 2>&1
+          chmod +x mihomo
+
+          sleep 3
+
+          # 3. 校验密钥是否填写，错误信息只存入日志
+          if [ -z "$proxy" ]; then
+            echo "❌ 严重错误：未提取到节点链接，请检查 GitHub Secrets" >> init_env.log 2>&1
             exit 1
           fi
-          
-          echo "✅ 解析成功！正在生成配置文件..."
-          echo "server: $SERVER" > hy2-config.yaml
-          echo "auth: $AUTH" >> hy2-config.yaml
-          echo "tls:" >> hy2-config.yaml
-          echo "  sni: $SNI" >> hy2-config.yaml
-          echo "  insecure: true" >> hy2-config.yaml
-          echo "socks5:" >> hy2-config.yaml
-          echo "  listen: 127.0.0.1:10808" >> hy2-config.yaml
-          
-          echo ">>> 启动代理客户端..."
-          nohup ./hysteria-linux-amd64 client -c hy2-config.yaml > hy2.log 2>&1 &
+
+          # 4. 使用 Python 脚本对节点 URL 进行编码，屏蔽不必要的系统信息输出
+          cat << 'EOF' > url_encode.py
+          import urllib.parse
+          import os
+          url = os.environ.get('proxy', '').strip()
+          print(urllib.parse.quote(url, safe=''))
+          EOF
+          ENCODED_PROXY=$(python -u url_encode.py)
+
+          # 5. 请求转换节点格式，将配置保存为 config.yaml，报错信息丢进日志
+          curl -s "http://127.0.0.1:25500/sub?target=clash&url=${ENCODED_PROXY}" > config.yaml 2>> init_env.log
+
+          # 检查配置是否生成成功
+          if ! grep -q "proxies:" config.yaml; then
+              echo "❌ 节点解析失败！请检查您的节点链接格式" >> init_env.log 2>&1
+              exit 1
+          fi
+
+          # 6. 静默修改代理端口为 10808
+          sed -i '/^mixed-port:/d' config.yaml
+          sed -i '/^port:/d' config.yaml
+          sed -i '/^socks-port:/d' config.yaml
+          echo -e "\nmixed-port: 10808" >> config.yaml
+
+          # 7. 在后台启动代理客户端，日志独立存放
+          nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
           sleep 5
 
-      - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
+      - name: 运行自动化脚本
         env:
           acount: ${{ secrets.ACOUNT }}
           HTTP_PROXY: socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || { 
-            echo "❌ 代理连接失败！为您提取底层日志："; 
-            echo "================ Hysteria2 运行日志 ================";
-            cat hy2.log;
-            echo "====================================================";
-            exit 1; 
-          }
+          # 静默测试代理连通性，如果失败则直接退出，排查时可去下载 proxy.log 查看
+          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || exit 1
           
+          # 静默安装虚拟屏幕所需环境，避免输出大段 apt-get 获取进度
           sudo apt-get update >> init_env.log 2>&1
           sudo apt-get install -y xvfb fonts-noto-cjk >> init_env.log 2>&1
           
-          echo ">>> 🚀 开始执行自动登录 Python 脚本..."
+          # 【唯一输出到控制台的步骤】
+          # 使用 -u 参数保证 Python 实时输出日志。不屏蔽此处输出，便于你直接在控制台监控业务进展
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
-      - name: 上传运行过程截图与日志文件
+      - name: 上传运行日志与截图
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -87,5 +101,6 @@ jobs:
           path: |
             screenshots/
             init_env.log
-            hy2.log
+            proxy.log
+            sub.log
           retention-days: 7
