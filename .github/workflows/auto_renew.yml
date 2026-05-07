@@ -30,7 +30,7 @@ jobs:
         run: |
           echo ">>> 正在下载 Xray-core 客户端 (支持全协议)..."
           wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip || { echo "❌ 下载失败！"; exit 1; }
-          unzip Xray-linux-64.zip
+          unzip Xray-linux-64.zip -x README.md
           chmod +x xray
           
           echo ">>> 正在生成 Python 解析脚本..."
