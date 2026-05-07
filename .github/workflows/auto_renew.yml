@@ -20,22 +20,34 @@ jobs:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
-        # 不屏蔽输出，直接打印到控制台方便查看安装进度和排错
+        # 将输出写入日志，只有失败时才打印到控制台
         run: |
-          pip install seleniumbase ddddocr PyAutoGUI
+          (
+            set -e
+            pip install seleniumbase ddddocr PyAutoGUI
+          ) > pip_install.log 2>&1 || {
+            echo "❌ 依赖安装失败，详细日志如下："
+            cat pip_install.log
+            exit 1
+          }
 
       - name: 🚀 智能解析全协议节点并启动 Xray
         env:
           PROXY: ${{ secrets.PROXY }}
         run: |
-          echo ">>> 正在下载 Xray-core 客户端 (支持全协议)..."
-          wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip || { echo "❌ 下载失败！"; exit 1; }
-          unzip Xray-linux-64.zip -x README.md
-          chmod +x xray
+          # 将下载、解压等准备工作静默处理，失败才输出
+          (
+            set -e
+            wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+            unzip Xray-linux-64.zip -x README.md
+            chmod +x xray
+          ) > xray_setup.log 2>&1 || {
+            echo "❌ Xray 下载或解压失败，详细日志如下："
+            cat xray_setup.log
+            exit 1
+          }
           
-          echo ">>> 正在生成 Python 解析脚本..."
-          # 使用 cat << 'EOF' 语法，将下方的 Python 代码动态写入到虚拟机的 parse_proxy.py 文件中
-          # 这种方式能够确保生成的文件严格遵循 Unix (LF) 换行符，避免报错
+          # 动态写入 Python 脚本，此步骤本身无输出
           cat << 'EOF' > parse_proxy.py
           import os, sys, json, base64
           from urllib.parse import urlparse, parse_qs
@@ -63,7 +75,6 @@ jobs:
           # 用于安全解码 VMess 的 Base64 字符串的方法
           def decode_b64(s):
               s = s.replace('-', '+').replace('_', '/')
-              # 自动补全 Base64 缺少的 "=" 等号
               s += "=" * ((4 - len(s) % 4) % 4)
               return base64.b64decode(s).decode('utf-8')
           
@@ -71,10 +82,8 @@ jobs:
               # ======= 处理 VMess 协议 =======
               if link.startswith("vmess://"):
                   outbound["protocol"] = "vmess"
-                  # 去掉开头的 "vmess://" (共8个字符)，然后解码剩下的 Base64
                   v_json = json.loads(decode_b64(link[8:]))
                   
-                  # 按照 Xray 的规范重新组装配置字典
                   outbound["settings"] = {
                       "vnext": [{
                           "address": v_json.get("add", ""),
@@ -87,7 +96,6 @@ jobs:
                       }]
                   }
                   
-                  # 处理网络传输类型 (tcp, ws) 和伪装域名
                   net = v_json.get("net", "tcp")
                   outbound["streamSettings"]["network"] = net
                   if net == "ws":
@@ -105,11 +113,9 @@ jobs:
                   proto = parsed.scheme
                   outbound["protocol"] = proto
                   
-                  # 提取 URL 中的账号密码、IP和端口
                   uuid_or_pass = parsed.username or ""
                   host = parsed.hostname or ""
                   port = parsed.port or 443
-                  # 解析问号 ? 后面的所有参数 (如 sni, type, pbk 等)
                   qs = parse_qs(parsed.query) 
                   
                   if proto == "vless":
@@ -135,7 +141,6 @@ jobs:
                   if security in ["tls", "reality"]:
                       outbound["streamSettings"]["security"] = security
                       outbound["streamSettings"][f"{security}Settings"] = {"serverName": qs.get("sni", [""])[0] or host}
-                      # 适配目前流行的 Reality 协议参数
                       if security == "reality":
                           outbound["streamSettings"]["realitySettings"] = {
                               "publicKey": qs.get("pbk", [""])[0],
@@ -170,23 +175,25 @@ jobs:
               sys.exit(1)
           EOF
           
-          echo ">>> 正在执行节点解析..."
-          # 使用 -u 参数进行无缓冲执行，确保错误信息能够第一时间打印
+          # 保留 Python 脚本的输出，使用 -u 开启无缓冲实时输出
           python -u parse_proxy.py
           
-          echo ">>> 启动 Xray 代理客户端..."
+          # 后台静默启动 Xray
           nohup ./xray run -c config.json > proxy.log 2>&1 &
           sleep 5
 
       - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
           acount: ${{ secrets.ACOUNT }}
-          # 本地代理端口已由上面的 Python 代码固定生成为 10808
           HTTP_PROXY: socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 || { 
+          # 验证代理连通性，屏蔽 curl 默认输出，失败时打印 Xray 底层日志
+          (
+            set -e
+            curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
+          ) > curl_test.log 2>&1 || { 
             echo "❌ 代理连接失败！为您提取底层日志："; 
             echo "================ Xray 运行日志 ================";
             cat proxy.log;
@@ -194,12 +201,18 @@ jobs:
             exit 1; 
           }
           
-          # 安装虚拟屏幕和字体（不屏蔽输出）
-          sudo apt-get update
-          sudo apt-get install -y xvfb fonts-noto-cjk
+          # 安装虚拟屏幕和字体（屏蔽输出，失败才显示）
+          (
+            set -e
+            sudo apt-get update
+            sudo apt-get install -y xvfb fonts-noto-cjk
+          ) > apt_install.log 2>&1 || {
+            echo "❌ 虚拟屏幕和字体安装失败，详细日志如下："
+            cat apt_install.log
+            exit 1
+          }
           
-          echo ">>> 🚀 开始执行自动登录 Python 脚本..."
-          # 同样加上 -u 参数以保证实时的无缓冲日志输出
+          # 保留 Python 脚本的执行日志，使用 -u 开启无缓冲实时输出
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行过程截图与日志文件
@@ -207,7 +220,8 @@ jobs:
         if: always()
         with:
           name: Auto-Login-Results
+          # 修改了上传路径，收集整个过程中可能产生的所有 log
           path: |
             screenshots/
-            proxy.log
+            *.log
           retention-days: 7
