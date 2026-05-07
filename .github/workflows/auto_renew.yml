@@ -25,10 +25,9 @@ jobs:
 
       - name: 启动全能代理核心 (原生支持 VLESS/VMESS/Socks5)
         env:
-          # 从 GitHub Secrets 中读取你的代理链接
           proxy: ${{ secrets.PROXY }}
         run: |
-          # 1. 仅下载代理核心 (Mihomo)，不再下载繁琐的转换器
+          # 1. 仅下载代理核心 (Mihomo)
           wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz >> init_env.log 2>&1
           gunzip mihomo.gz >> init_env.log 2>&1
           chmod +x mihomo
@@ -43,28 +42,25 @@ jobs:
           import os
           import base64
           url = os.environ.get('proxy', '').strip()
-          # 为节点加上默认名称防呆
           if '#' not in url:
               url += '#MyNode'
-          # 进行 Base64 编码 (标准的订阅格式)
           b64 = base64.b64encode(url.encode('utf-8')).decode('utf-8')
           with open('node.txt', 'w', encoding='utf-8') as f:
               f.write(b64)
           EOF
           python -u encode_node.py
 
-          # 3. 启动本地微型网页服务器，用于给代理软件下发刚刚生成的订阅
+          # 3. 启动本地微型网页服务器下发订阅
           python -m http.server 8080 > http.log 2>&1 &
           HTTP_PID=$!
           sleep 2
 
-          # 4. 直接生成代理核心的配置文件，让它自己去读取订阅
+          # 4. 生成代理核心配置文件 (已修复本地流量套娃死循环)
           cat << 'EOF' > config.yaml
           mixed-port: 10808
           mode: rule
           log-level: debug
           
-          # 让 Mihomo 直接读取我们本地的 Base64 订阅文件
           proxy-providers:
             my-provider:
               type: http
@@ -72,32 +68,27 @@ jobs:
               path: ./provider.yaml
               interval: 3600
           
-          # 自动将读取到的节点放入代理组
+          # 使用 fallback 自动测试并选择可用节点
           proxy-groups:
             - name: PROXY
-              type: select
+              type: fallback
+              url: 'http://cp.cloudflare.com/generate_204'
+              interval: 300
               use:
                 - my-provider
           
-          # 全局接管规则
           rules:
+            # 必须：防止代理软件去代理本地的 8080 端口造成死循环
+            - IP-CIDR,127.0.0.0/8,DIRECT
             - MATCH,PROXY
           EOF
 
           # 5. 后台启动 Mihomo 接管网络
           nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
           
-          # 给代理核心 5 秒钟的时间去下载、解析订阅文件
+          # 给代理核心 5 秒钟的时间去下载和解析
           sleep 5
-          # 关闭本地微型服务器释放资源
           kill $HTTP_PID || true
-
-          # 6. 验证代理核心是否成功解析了节点 (如果成功，它会生成一个 provider.yaml 文件)
-          if [ ! -f "provider.yaml" ] || ! grep -q "name:" provider.yaml; then
-              echo "❌ 代理核心解析节点失败！为您提取底层排错日志：" >> init_env.log 2>&1
-              cat proxy.log >> init_env.log 2>&1
-              exit 1
-          fi
 
       - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
@@ -106,18 +97,18 @@ jobs:
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          # 测试代理连通性
+          # 6. 直接进行最终连通性测试！
+          echo ">>> 正在测试代理节点连通性..."
           curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || {
-            echo "❌ 代理连接失败，节点可能已失效或无法连通。底层日志如下：" >> init_env.log 2>&1
-            cat proxy.log >> init_env.log 2>&1
+            echo "❌ 代理连接失败，节点可能已失效或无法连通。底层日志如下："
+            cat proxy.log
             exit 1
           }
           
-          # 安装虚拟屏幕系统依赖
           sudo apt-get update >> init_env.log 2>&1
           sudo apt-get install -y xvfb fonts-noto-cjk >> init_env.log 2>&1
           
-          # 启动您的核心自动化业务脚本
+          echo ">>> 🚀 代理连接成功！开始执行 Python 业务脚本..."
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行日志与截图
@@ -129,5 +120,4 @@ jobs:
             screenshots/
             init_env.log
             proxy.log
-            provider.yaml
           retention-days: 7
