@@ -21,89 +21,103 @@ jobs:
 
       - name: 安装 Python 依赖包
         run: |
-          # 安装需要的包并隐藏繁杂的输出
           pip install seleniumbase ddddocr PyAutoGUI >> init_env.log 2>&1
 
-      - name: 智能解析节点并启动代理核心
+      - name: 启动全能代理核心 (原生支持 VLESS/VMESS/Socks5)
         env:
+          # 从 GitHub Secrets 中读取你的代理链接
           proxy: ${{ secrets.PROXY }}
         run: |
-          # 1. 下载并启动节点转换器
-          wget -qO sub.tar.gz https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz >> init_env.log 2>&1
-          tar -zxf sub.tar.gz >> init_env.log 2>&1
-          chmod +x subconverter/subconverter
-          nohup ./subconverter/subconverter > sub.log 2>&1 &
-
-          # 2. 下载代理核心 (Mihomo)
+          # 1. 仅下载代理核心 (Mihomo)，不再下载繁琐的转换器
           wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz >> init_env.log 2>&1
           gunzip mihomo.gz >> init_env.log 2>&1
           chmod +x mihomo
 
-          sleep 3
-
           if [ -z "$proxy" ]; then
-            echo "❌ 未提取到节点链接" >> init_env.log 2>&1
+            echo "❌ 严重错误：未提取到节点链接！" >> init_env.log 2>&1
             exit 1
           fi
 
-          # ================= 【修复核心部分】 =================
-          
-          # 3. 使用 Python 将节点链接安全地写入本地文本文件 (node.txt)
-          cat << 'EOF' > make_node_file.py
+          # 2. 使用 Python 将节点链接打包成标准的 Base64 订阅格式
+          cat << 'EOF' > encode_node.py
           import os
+          import base64
+          url = os.environ.get('proxy', '').strip()
+          # 为节点加上默认名称防呆
+          if '#' not in url:
+              url += '#MyNode'
+          # 进行 Base64 编码 (标准的订阅格式)
+          b64 = base64.b64encode(url.encode('utf-8')).decode('utf-8')
           with open('node.txt', 'w', encoding='utf-8') as f:
-              f.write(os.environ.get('proxy', '').strip())
+              f.write(b64)
           EOF
-          # 运行这段 Python 代码
-          python -u make_node_file.py
+          python -u encode_node.py
 
-          # 4. 在后台启动一个本地的微型 Web 服务器，端口设为 8080
+          # 3. 启动本地微型网页服务器，用于给代理软件下发刚刚生成的订阅
           python -m http.server 8080 > http.log 2>&1 &
           HTTP_PID=$!
           sleep 2
 
-          # 5. 请求转换器去下载我们本地 8080 端口上的 node.txt 
-          # URL 编码后的 http://127.0.0.1:8080/node.txt 就是下面这串字符
-          curl -s "http://127.0.0.1:25500/sub?target=clash&url=http%3A%2F%2F127.0.0.1%3A8080%2Fnode.txt" > config.yaml 2>> init_env.log
+          # 4. 直接生成代理核心的配置文件，让它自己去读取订阅
+          cat << 'EOF' > config.yaml
+          mixed-port: 10808
+          mode: rule
+          log-level: debug
           
-          # 解析完毕后，关掉本地微型服务器以节省系统资源
-          kill $HTTP_PID
+          # 让 Mihomo 直接读取我们本地的 Base64 订阅文件
+          proxy-providers:
+            my-provider:
+              type: http
+              url: "http://127.0.0.1:8080/node.txt"
+              path: ./provider.yaml
+              interval: 3600
           
-          # ==================================================
+          # 自动将读取到的节点放入代理组
+          proxy-groups:
+            - name: PROXY
+              type: select
+              use:
+                - my-provider
+          
+          # 全局接管规则
+          rules:
+            - MATCH,PROXY
+          EOF
 
-          # 6. 检查代理配置文件是否成功生成
-          if ! grep -q "proxies:" config.yaml; then
-              echo "❌ 节点解析依然失败！" >> init_env.log 2>&1
-              # 如果失败，把生成的错误文件写入日志供日后排查
-              cat config.yaml >> init_env.log 2>&1
+          # 5. 后台启动 Mihomo 接管网络
+          nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
+          
+          # 给代理核心 5 秒钟的时间去下载、解析订阅文件
+          sleep 5
+          # 关闭本地微型服务器释放资源
+          kill $HTTP_PID || true
+
+          # 6. 验证代理核心是否成功解析了节点 (如果成功，它会生成一个 provider.yaml 文件)
+          if [ ! -f "provider.yaml" ] || ! grep -q "name:" provider.yaml; then
+              echo "❌ 代理核心解析节点失败！为您提取底层排错日志：" >> init_env.log 2>&1
+              cat proxy.log >> init_env.log 2>&1
               exit 1
           fi
 
-          # 7. 强制将本地代理端口绑定为 10808
-          sed -i '/^mixed-port:/d' config.yaml
-          sed -i '/^port:/d' config.yaml
-          sed -i '/^socks-port:/d' config.yaml
-          echo -e "\nmixed-port: 10808" >> config.yaml
-
-          # 8. 后台启动 Mihomo 接管网络
-          nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
-          sleep 5
-
-      - name: 运行自动化脚本
+      - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
           acount: ${{ secrets.ACOUNT }}
           HTTP_PROXY: socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          # 测试连通性
-          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || exit 1
+          # 测试代理连通性
+          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || {
+            echo "❌ 代理连接失败，节点可能已失效或无法连通。底层日志如下：" >> init_env.log 2>&1
+            cat proxy.log >> init_env.log 2>&1
+            exit 1
+          }
           
-          # 安装虚拟屏幕
+          # 安装虚拟屏幕系统依赖
           sudo apt-get update >> init_env.log 2>&1
           sudo apt-get install -y xvfb fonts-noto-cjk >> init_env.log 2>&1
           
-          # 启动你的核心脚本（这里保留了你的 -u 参数以防日志截断）
+          # 启动您的核心自动化业务脚本
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行日志与截图
@@ -115,5 +129,5 @@ jobs:
             screenshots/
             init_env.log
             proxy.log
-            sub.log
+            provider.yaml
           retention-days: 7
