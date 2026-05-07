@@ -12,409 +12,106 @@ jobs:
 
     steps:
       - name: 获取代码仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: 配置 Python 环境
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
         run: |
-          python -m pip install --upgrade pip
-          pip install seleniumbase ddddocr PyAutoGUI > init_env.log 2>&1
+          pip install seleniumbase ddddocr PyAutoGUI >> init_env.log 2>&1
 
-      - name: 下载并解压 sing-box
+      - name: 启动全能代理核心 (原生支持 VLESS/VMESS/Socks5)
+        env:
+          proxy: ${{ secrets.PROXY }}
         run: |
-          set -euo pipefail
+          # 1. 仅下载代理核心 (Mihomo)
+          wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz >> init_env.log 2>&1
+          gunzip mihomo.gz >> init_env.log 2>&1
+          chmod +x mihomo
 
-          echo ">>> 正在获取 sing-box 最新发行版下载地址..."
-          SINGBOX_URL="$(python3 - <<'PY'
-import json
-import urllib.request
-
-api = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-data = json.load(urllib.request.urlopen(api))
-
-for asset in data["assets"]:
-    name = asset.get("name", "")
-    if "linux-amd64" in name and name.endswith(".tar.gz"):
-        print(asset["browser_download_url"])
-        break
-else:
-    raise SystemExit("找不到 linux-amd64 的 sing-box 发行包")
-PY
-)"
-
-          echo ">>> 下载地址: ${SINGBOX_URL}"
-          curl -fsSL -o sing-box.tar.gz "$SINGBOX_URL"
-          tar -xzf sing-box.tar.gz
-
-          SINGBOX_BIN="$(find . -type f -name sing-box | head -n 1)"
-          if [ -z "$SINGBOX_BIN" ]; then
-            echo "❌ 未找到 sing-box 可执行文件"
+          if [ -z "$proxy" ]; then
+            echo "❌ 严重错误：未提取到节点链接！" >> init_env.log 2>&1
             exit 1
           fi
 
-          chmod +x "$SINGBOX_BIN"
-          echo "SINGBOX_BIN=$SINGBOX_BIN" >> "$GITHUB_ENV"
-          echo "✅ sing-box 已准备完成: $SINGBOX_BIN"
+          # 2. 使用 Python 将节点链接打包成标准的 Base64 订阅格式
+          cat << 'EOF' > encode_node.py
+          import os
+          import base64
+          url = os.environ.get('proxy', '').strip()
+          if '#' not in url:
+              url += '#MyNode'
+          b64 = base64.b64encode(url.encode('utf-8')).decode('utf-8')
+          with open('node.txt', 'w', encoding='utf-8') as f:
+              f.write(b64)
+          EOF
+          python -u encode_node.py
 
-      - name: 🚀 智能解析节点并启动代理
-        env:
-          PROXY: ${{ secrets.PROXY }}
-        run: |
-          set -euo pipefail
+          # 3. 启动本地微型网页服务器下发订阅
+          python -m http.server 8080 > http.log 2>&1 &
+          HTTP_PID=$!
+          sleep 2
 
-          echo ">>> 正在解析 PROXY 节点链接，并生成 sing-box 配置..."
-          python3 - <<'PY'
-import os
-import sys
-import json
-import base64
-import urllib.parse
+          # 4. 生成代理核心配置文件 (已修复本地流量套娃死循环)
+          cat << 'EOF' > config.yaml
+          mixed-port: 10808
+          mode: rule
+          log-level: debug
+          
+          proxy-providers:
+            my-provider:
+              type: http
+              url: "http://127.0.0.1:8080/node.txt"
+              path: ./provider.yaml
+              interval: 3600
+          
+          # 使用 fallback 自动测试并选择可用节点
+          proxy-groups:
+            - name: PROXY
+              type: fallback
+              url: 'http://cp.cloudflare.com/generate_204'
+              interval: 300
+              use:
+                - my-provider
+          
+          rules:
+            # 必须：防止代理软件去代理本地的 8080 端口造成死循环
+            - IP-CIDR,127.0.0.0/8,DIRECT
+            - MATCH,PROXY
+          EOF
 
-proxy = os.environ.get("PROXY", "").strip()
-
-if not proxy:
-    print("❌ PROXY 为空，请先在 GitHub Secrets 里填写节点链接。")
-    sys.exit(1)
-
-def b64decode_auto(text: str) -> str:
-    text = text.strip()
-    text += "=" * (-len(text) % 4)
-    try:
-        return base64.urlsafe_b64decode(text.encode()).decode()
-    except Exception:
-        return base64.b64decode(text.encode()).decode()
-
-def qdict(u):
-    return {k: v[-1] for k, v in urllib.parse.parse_qs(u.query, keep_blank_values=True).items()}
-
-def normalize_scheme(scheme: str) -> str:
-    scheme = scheme.lower()
-    if scheme == "socks5":
-        return "socks"
-    if scheme == "shadowsocks":
-        return "ss"
-    if scheme == "hy2":
-        return "hysteria2"
-    return scheme
-
-def make_tls(host: str, q: dict, enabled: bool = True):
-    if not enabled:
-        return None
-
-    tls = {"enabled": True}
-
-    sni = q.get("sni") or q.get("server_name") or host
-    if sni:
-        tls["server_name"] = sni
-
-    insecure = (q.get("insecure", "").lower() in ("1", "true", "yes", "on"))
-    if insecure:
-        tls["insecure"] = True
-
-    fp = q.get("fp") or q.get("fingerprint")
-    if fp:
-        tls["utls"] = {
-            "enabled": True,
-            "fingerprint": fp
-        }
-
-    return tls
-
-def make_ws_transport(q: dict, host: str):
-    path = q.get("path") or "/"
-    headers = {}
-
-    ws_host = q.get("host")
-    if ws_host:
-        headers["Host"] = ws_host
-    elif host:
-        headers["Host"] = host
-
-    transport = {
-        "type": "ws",
-        "path": path
-    }
-    if headers:
-        transport["headers"] = headers
-    return transport
-
-def parse_vmess_json(raw: str):
-    data = json.loads(raw)
-    host = data.get("add") or data.get("server") or ""
-    port = int(data.get("port") or 0)
-    uuid = data.get("id") or ""
-    alter_id = int(data.get("aid") or data.get("alterId") or 0)
-    net = (data.get("net") or "tcp").lower()
-    tls_on = str(data.get("tls") or "").lower() in ("tls", "1", "true", "yes")
-
-    out = {
-        "type": "vmess",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "uuid": uuid,
-        "security": "auto",
-        "alter_id": alter_id
-    }
-
-    if tls_on:
-        tls_q = {"sni": data.get("sni") or data.get("servername") or host}
-        out["tls"] = make_tls(host, tls_q, True)
-
-    if net == "ws":
-        out["transport"] = {
-            "type": "ws",
-            "path": data.get("path") or "/"
-        }
-        ws_host = data.get("host")
-        if ws_host:
-            out["transport"]["headers"] = {"Host": ws_host}
-
-    return out
-
-def build_from_url(uri: str):
-    original_scheme = uri.split(":", 1)[0].lower()
-    scheme = normalize_scheme(original_scheme)
-    u = urllib.parse.urlparse(uri)
-    q = qdict(u)
-
-    host = u.hostname or ""
-    port = u.port
-
-    # 兼容 vmess://base64(JSON)
-    if scheme == "vmess":
-        raw = uri.split("://", 1)[1]
-
-        # 标准 vmess 通常是 base64(JSON)
-        if "@" not in raw:
-            decoded = b64decode_auto(raw)
-            return parse_vmess_json(decoded)
-
-    if scheme == "vless":
-        uuid = urllib.parse.unquote(u.username or "")
-        if not uuid:
-            raise ValueError("VLESS 缺少 UUID")
-
-        out = {
-            "type": "vless",
-            "tag": "proxy",
-            "server": host,
-            "server_port": port,
-            "uuid": uuid
-        }
-
-        flow = q.get("flow")
-        if flow:
-            out["flow"] = flow
-
-        security = (q.get("security") or "").lower()
-        if security in ("tls", "reality", "xtls"):
-            out["tls"] = make_tls(host, q, True)
-
-        transport_type = (q.get("type") or q.get("transport") or "").lower()
-        if transport_type == "ws":
-            out["transport"] = make_ws_transport(q, host)
-
-        return out
-
-    if scheme == "vmess":
-        # 兼容少数非标准的 vmess://uuid@host:port 形式
-        username = urllib.parse.unquote(u.username or "")
-        if not username:
-            raw = uri.split("://", 1)[1]
-            if "@" in raw:
-                username = urllib.parse.unquote(raw.split("@", 1)[0])
-
-        if not username:
-            raise ValueError("VMess 缺少 UUID")
-
-        out = {
-            "type": "vmess",
-            "tag": "proxy",
-            "server": host,
-            "server_port": port,
-            "uuid": username,
-            "security": q.get("security", "auto"),
-            "alter_id": int(q.get("alter_id") or q.get("aid") or 0)
-        }
-
-        if (q.get("tls", "").lower() in ("1", "true", "tls", "yes")):
-            out["tls"] = make_tls(host, q, True)
-
-        transport_type = (q.get("type") or q.get("net") or "").lower()
-        if transport_type == "ws":
-            out["transport"] = make_ws_transport(q, host)
-
-        return out
-
-    if scheme in ("socks", "http"):
-        out = {
-            "type": scheme,
-            "tag": "proxy",
-            "server": host,
-            "server_port": port or (443 if original_scheme == "https" else 1080)
-        }
-
-        if u.username:
-            out["username"] = urllib.parse.unquote(u.username)
-        if u.password:
-            out["password"] = urllib.parse.unquote(u.password)
-
-        if original_scheme == "https" or q.get("tls", "").lower() in ("1", "true", "tls", "yes"):
-            out["tls"] = make_tls(host, q, True)
-
-        return out
-
-    if scheme == "ss":
-        raw = uri.split("://", 1)[1]
-        method = ""
-        password = ""
-        server = ""
-        server_port = 0
-
-        if "@" in raw:
-            cred, addr = raw.rsplit("@", 1)
-
-            if ":" in cred:
-                method, password = cred.split(":", 1)
-            else:
-                decoded_cred = b64decode_auto(cred)
-                method, password = decoded_cred.split(":", 1)
-
-            addr = addr.split("#", 1)[0]
-            server, port_text = addr.rsplit(":", 1)
-            server_port = int(port_text)
-        else:
-            decoded = b64decode_auto(raw)
-            if "@" not in decoded:
-                raise ValueError("Shadowsocks 链接解析失败")
-            cred, addr = decoded.rsplit("@", 1)
-            method, password = cred.split(":", 1)
-            server, port_text = addr.rsplit(":", 1)
-            server_port = int(port_text)
-
-        return {
-            "type": "shadowsocks",
-            "tag": "proxy",
-            "server": server,
-            "server_port": server_port,
-            "method": method,
-            "password": password
-        }
-
-    if scheme == "trojan":
-        password = urllib.parse.unquote(u.username or u.password or q.get("password", ""))
-        if not password:
-            raise ValueError("Trojan 缺少密码")
-
-        return {
-            "type": "trojan",
-            "tag": "proxy",
-            "server": host,
-            "server_port": port,
-            "password": password,
-            "tls": make_tls(host, q, True)
-        }
-
-    if scheme == "hysteria2":
-        password = urllib.parse.unquote(u.username or u.password or q.get("password", ""))
-        if not password:
-            raise ValueError("Hysteria2 缺少密码")
-
-        out = {
-            "type": "hysteria2",
-            "tag": "proxy",
-            "server": host,
-            "server_port": port,
-            "password": password,
-            "tls": make_tls(host, q, True)
-        }
-
-        return out
-
-    raise ValueError(f"不支持的协议: {scheme}")
-
-if "://" not in proxy:
-    print("❌ PROXY 必须是完整节点链接，例如 vless://、vmess://、socks5://、ss:// ...")
-    sys.exit(1)
-
-outbound = build_from_url(proxy)
-
-config = {
-    "log": {
-        "level": "info"
-    },
-    "inbounds": [
-        {
-            "type": "socks",
-            "tag": "local-socks",
-            "listen": "127.0.0.1",
-            "listen_port": 10808
-        }
-    ],
-    "outbounds": [
-        outbound,
-        {
-            "type": "direct",
-            "tag": "direct"
-        },
-        {
-            "type": "block",
-            "tag": "block"
-        }
-    ],
-    "route": {
-        "final": "proxy",
-        "auto_detect_interface": True
-    }
-}
-
-with open("sing-box.json", "w", encoding="utf-8") as f:
-    json.dump(config, f, ensure_ascii=False, indent=2)
-
-print("✅ sing-box.json 生成成功")
-print(json.dumps(outbound, ensure_ascii=False, indent=2))
-PY
-
-      - name: 启动代理客户端
-        run: |
-          set -euo pipefail
-          echo ">>> 启动 sing-box..."
-          nohup "$SINGBOX_BIN" run -c sing-box.json > sing-box.log 2>&1 &
+          # 5. 后台启动 Mihomo 接管网络
+          nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
+          
+          # 给代理核心 5 秒钟的时间去下载和解析
           sleep 5
-
-          echo ">>> 检查本地代理端口..."
-          ss -lntp | grep 10808 || true
+          kill $HTTP_PID || true
 
       - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
           acount: ${{ secrets.ACOUNT }}
-          ALL_PROXY: socks5h://127.0.0.1:10808
-          HTTP_PROXY: socks5h://127.0.0.1:10808
-          HTTPS_PROXY: socks5h://127.0.0.1:10808
+          HTTP_PROXY: socks5://127.0.0.1:10808
+          HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          set -euo pipefail
-
-          curl -x socks5h://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || {
-            echo "❌ 代理连接失败！"
-            echo "================ sing-box 运行日志 ================"
-            cat sing-box.log
-            echo "===================================================="
+          # 6. 直接进行最终连通性测试！
+          echo ">>> 正在测试代理节点连通性..."
+          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || {
+            echo "❌ 代理连接失败，节点可能已失效或无法连通。底层日志如下："
+            cat proxy.log
             exit 1
           }
-
+          
           sudo apt-get update >> init_env.log 2>&1
           sudo apt-get install -y xvfb fonts-noto-cjk >> init_env.log 2>&1
-
-          echo ">>> 🚀 开始执行自动登录 Python 脚本..."
+          
+          echo ">>> 🚀 代理连接成功！开始执行 Python 业务脚本..."
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
-      - name: 上传运行过程截图与日志文件
+      - name: 上传运行日志与截图
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -422,6 +119,5 @@ PY
           path: |
             screenshots/
             init_env.log
-            sing-box.log
-            sing-box.json
+            proxy.log
           retention-days: 7
