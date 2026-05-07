@@ -34,17 +34,106 @@ jobs:
       - name: 🚀 智能解析全协议节点并启动代理内核
         env:
           PROXY: ${{ secrets.PROXY }}
+          # 【修复核心】将整段 Python 代码存为名为 PY_SCRIPT 的环境变量，完美避开缩进冲突！
+          PY_SCRIPT: |
+            import os, sys, json, base64
+            from urllib.parse import urlparse, parse_qs
+
+            link = os.environ.get('PROXY', '').strip()
+            if not link:
+                print("❌ 错误：环境变量 PROXY 为空！")
+                sys.exit(1)
+
+            config = {
+                "log": {"loglevel": "warning"},
+                "inbounds": [{
+                    "port": 10808,
+                    "listen": "127.0.0.1",
+                    "protocol": "socks",
+                    "settings": {"udp": True}
+                }],
+                "outbounds": []
+            }
+
+            outbound = {"protocol": "", "settings": {}, "streamSettings": {}}
+
+            def decode_b64(s):
+                s = s.replace('-', '+').replace('_', '/')
+                s += "=" * ((4 - len(s) % 4) % 4)
+                return base64.b64decode(s).decode('utf-8')
+
+            try:
+                if link.startswith("vmess://"):
+                    outbound["protocol"] = "vmess"
+                    v_json = json.loads(decode_b64(link[8:]))
+                    outbound["settings"] = {"vnext": [{"address": v_json.get("add", ""), "port": int(v_json.get("port", 443)), "users": [{"id": v_json.get("id", ""), "alterId": int(v_json.get("aid", 0)), "security": v_json.get("scy", "auto")}]}]}
+                    net = v_json.get("net", "tcp")
+                    outbound["streamSettings"]["network"] = net
+                    if net == "ws":
+                        outbound["streamSettings"]["wsSettings"] = {"path": v_json.get("path", "/"), "headers": {"Host": v_json.get("host", "")} if v_json.get("host") else {}}
+                    if v_json.get("tls") == "tls":
+                        outbound["streamSettings"]["security"] = "tls"
+                        outbound["streamSettings"]["tlsSettings"] = {"serverName": v_json.get("sni", "") or v_json.get("add", "")}
+                        
+                elif link.startswith("vless://") or link.startswith("trojan://"):
+                    parsed = urlparse(link)
+                    proto = parsed.scheme
+                    outbound["protocol"] = proto
+                    uuid_or_pass = parsed.username or ""
+                    host = parsed.hostname or ""
+                    port = parsed.port or 443
+                    qs = parse_qs(parsed.query) 
+                    
+                    if proto == "vless":
+                        outbound["settings"] = {"vnext": [{"address": host, "port": port, "users": [{"id": uuid_or_pass, "encryption": qs.get("encryption", ["none"])[0]}]}]}
+                    else:
+                        outbound["settings"] = {"servers": [{"address": host, "port": port, "password": uuid_or_pass}]}
+                        
+                    net = qs.get("type", ["tcp"])[0]
+                    outbound["streamSettings"]["network"] = net
+                    if net == "ws":
+                        outbound["streamSettings"]["wsSettings"] = {"path": qs.get("path", ["/"])[0], "headers": {"Host": qs.get("host", [""])[0]} if qs.get("host") else {}}
+                        
+                    security = qs.get("security", ["none"])[0]
+                    if security in ["tls", "reality"]:
+                        outbound["streamSettings"]["security"] = security
+                        outbound["streamSettings"][f"{security}Settings"] = {"serverName": qs.get("sni", [""])[0] or host}
+                        if security == "reality":
+                            outbound["streamSettings"]["realitySettings"] = {"publicKey": qs.get("pbk", [""])[0], "shortId": qs.get("sid", [""])[0], "fingerprint": qs.get("fp", ["chrome"])[0]}
+
+                elif link.startswith("socks5://"):
+                    outbound["protocol"] = "socks"
+                    parsed = urlparse(link)
+                    server = {"address": parsed.hostname, "port": parsed.port or 1080}
+                    if parsed.username:
+                        server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
+                    outbound["settings"] = {"servers": [server]}
+
+                else:
+                    print(f"❌ 暂不支持自动解析此协议: {link[:10]}...")
+                    sys.exit(1)
+
+                config["outbounds"].append(outbound)
+                with open("config.json", "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2)
+                    
+                print(f"✅ 成功将 {link[:8]}... 链接转换为 config.json 配置文件！")
+                
+            except Exception as e:
+                print(f"❌ 解析链接时发生致命错误: {e}")
+                sys.exit(1)
         run: |
-          # 检查是否为空
+          # 检查环境变量中是否填写了代理链接
           if [ -z "$PROXY" ]; then
               echo "❌ 错误：环境变量 PROXY 为空！"
               exit 1
           fi
 
-          # 判断是否为 Hysteria2 协议
+          # ==========================================
+          # 分支 1：处理 Hysteria2 协议 (hy2:// 或 hysteria2://)
+          # ==========================================
           if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
               
-              # 将 Hysteria 下载、赋予权限等准备工作静默处理，失败才输出
               (
                 set -e
                 wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
@@ -55,32 +144,26 @@ jobs:
                 exit 1
               }
               
-              # 截取解析链接参数 (加上 || true 防止闪退)
               AUTH=$(echo "$PROXY" | sed -n 's|.*://\([^@]*\)@.*|\1|p' || true)
               SERVER=$(echo "$PROXY" | sed -n 's|.*@\([^/?#]*\).*|\1|p' || true)
               SNI=$(echo "$PROXY" | grep -oP 'sni=\K[^&#]*' || true)
               
-              # 生成 Hysteria 专属配置文件
-              cat << EOF > config.yaml
-server: $SERVER
-auth: $AUTH
-tls:
-  sni: $SNI
-  insecure: true
-socks5:
-  listen: 127.0.0.1:10808
-EOF
+              echo "server: $SERVER" > config.yaml
+              echo "auth: $AUTH" >> config.yaml
+              echo "tls:" >> config.yaml
+              echo "  sni: $SNI" >> config.yaml
+              echo "  insecure: true" >> config.yaml
+              echo "socks5:" >> config.yaml
+              echo "  listen: 127.0.0.1:10808" >> config.yaml
+              
               echo "✅ 成功将 Hysteria2 链接转换为 config.yaml 配置文件！"
               
-              # 后台静默启动 Hysteria
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
               
+          # ==========================================
+          # 分支 2：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
+          # ==========================================
           else
-              # ==========================================
-              # 原版的 Xray 处理逻辑 (VMess/VLESS/Trojan)
-              # ==========================================
-              
-              # 将下载、解压等准备工作静默处理，失败才输出
               (
                 set -e
                 wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
@@ -92,141 +175,17 @@ EOF
                 exit 1
               }
               
-              # 动态写入 Python 脚本，此步骤本身无输出
-              cat << 'EOF' > parse_proxy.py
-import os, sys, json, base64
-from urllib.parse import urlparse, parse_qs
-
-# 1. 从环境变量获取我们填入的节点链接
-link = os.environ.get('PROXY', '').strip()
-if not link:
-    print("❌ 错误：环境变量 PROXY 为空！")
-    sys.exit(1)
-
-# 2. 准备基础的 Xray 模板 (固定在本地 10808 端口开启 socks5 监听)
-config = {
-    "log": {"loglevel": "warning"},
-    "inbounds": [{
-        "port": 10808,
-        "listen": "127.0.0.1",
-        "protocol": "socks",
-        "settings": {"udp": True}
-    }],
-    "outbounds": []
-}
-
-outbound = {"protocol": "", "settings": {}, "streamSettings": {}}
-
-# 用于安全解码 VMess 的 Base64 字符串的方法
-def decode_b64(s):
-    s = s.replace('-', '+').replace('_', '/')
-    s += "=" * ((4 - len(s) % 4) % 4)
-    return base64.b64decode(s).decode('utf-8')
-
-try:
-    # ======= 处理 VMess 协议 =======
-    if link.startswith("vmess://"):
-        outbound["protocol"] = "vmess"
-        v_json = json.loads(decode_b64(link[8:]))
-        
-        outbound["settings"] = {
-            "vnext": [{
-                "address": v_json.get("add", ""),
-                "port": int(v_json.get("port", 443)),
-                "users": [{
-                    "id": v_json.get("id", ""), 
-                    "alterId": int(v_json.get("aid", 0)), 
-                    "security": v_json.get("scy", "auto")
-                }]
-            }]
-        }
-        
-        net = v_json.get("net", "tcp")
-        outbound["streamSettings"]["network"] = net
-        if net == "ws":
-            outbound["streamSettings"]["wsSettings"] = {
-                "path": v_json.get("path", "/"),
-                "headers": {"Host": v_json.get("host", "")} if v_json.get("host") else {}
-            }
-        if v_json.get("tls") == "tls":
-            outbound["streamSettings"]["security"] = "tls"
-            outbound["streamSettings"]["tlsSettings"] = {"serverName": v_json.get("sni", "") or v_json.get("add", "")}
-            
-    # ======= 处理 VLESS / Trojan 协议 =======
-    elif link.startswith("vless://") or link.startswith("trojan://"):
-        parsed = urlparse(link)
-        proto = parsed.scheme
-        outbound["protocol"] = proto
-        
-        uuid_or_pass = parsed.username or ""
-        host = parsed.hostname or ""
-        port = parsed.port or 443
-        qs = parse_qs(parsed.query) 
-        
-        if proto == "vless":
-            outbound["settings"] = {
-                "vnext": [{
-                    "address": host,
-                    "port": port,
-                    "users": [{"id": uuid_or_pass, "encryption": qs.get("encryption", ["none"])[0]}]
-                }]
-            }
-        else:
-            outbound["settings"] = {"servers": [{"address": host, "port": port, "password": uuid_or_pass}]}
-            
-        net = qs.get("type", ["tcp"])[0]
-        outbound["streamSettings"]["network"] = net
-        if net == "ws":
-            outbound["streamSettings"]["wsSettings"] = {
-                "path": qs.get("path", ["/"])[0],
-                "headers": {"Host": qs.get("host", [""])[0]} if qs.get("host") else {}
-            }
-            
-        security = qs.get("security", ["none"])[0]
-        if security in ["tls", "reality"]:
-            outbound["streamSettings"]["security"] = security
-            outbound["streamSettings"][f"{security}Settings"] = {"serverName": qs.get("sni", [""])[0] or host}
-            if security == "reality":
-                outbound["streamSettings"]["realitySettings"] = {
-                    "publicKey": qs.get("pbk", [""])[0],
-                    "shortId": qs.get("sid", [""])[0],
-                    "fingerprint": qs.get("fp", ["chrome"])[0]
-                }
-
-    # ======= 处理 Socks5 协议 =======
-    elif link.startswith("socks5://"):
-        outbound["protocol"] = "socks"
-        parsed = urlparse(link)
-        server = {"address": parsed.hostname, "port": parsed.port or 1080}
-        if parsed.username:
-            server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
-        outbound["settings"] = {"servers": [server]}
-
-    else:
-        print(f"❌ 暂不支持自动解析此协议: {link[:10]}...")
-        sys.exit(1)
-
-    # 3. 将组装好的出站规则加入到总配置中
-    config["outbounds"].append(outbound)
-    
-    # 4. 生成 Xray 能够识别的 JSON 配置文件
-    with open("config.json", "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-        
-    print(f"✅ 成功将 {link[:8]}... 链接转换为 config.json 配置文件！")
-    
-except Exception as e:
-    print(f"❌ 解析链接时发生致命错误: {e}")
-    sys.exit(1)
-EOF
-              # 保留 Python 脚本的输出，使用 -u 开启无缓冲实时输出
+              # 【修复核心】安全地将存放在环境变量中的 Python 代码输出为实体文件
+              printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
+              
+              # 运行 Python 解析脚本
               python -u parse_proxy.py
               
               # 后台静默启动 Xray
               nohup ./xray run -c config.json > proxy.log 2>&1 &
           fi
           
-          # 等待 5 秒，确保无论启动的是哪个内核，都有时间建立连接
+          # 等待 5 秒建连
           sleep 5
 
       - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
@@ -236,7 +195,6 @@ EOF
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          # 验证代理连通性，屏蔽 curl 默认输出，失败时打印底层日志
           (
             set -e
             curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
@@ -248,7 +206,6 @@ EOF
             exit 1; 
           }
           
-          # 安装虚拟屏幕和字体（屏蔽输出，失败才显示）
           (
             set -e
             sudo apt-get update
@@ -259,7 +216,6 @@ EOF
             exit 1
           }
           
-          # 保留 Python 脚本的执行日志，使用 -u 开启无缓冲实时输出
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行过程截图与日志文件
@@ -267,7 +223,6 @@ EOF
         if: always()
         with:
           name: Auto-Login-Results
-          # 收集整个过程中可能产生的所有 log
           path: |
             screenshots/
             *.log
