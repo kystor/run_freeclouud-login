@@ -1,117 +1,479 @@
+# =====================================================================
+# GitHub Actions 工作流：多账号自动登录续期任务
+# 支持代理协议：hysteria2 / hy2 / socks5 / vmess / vless / trojan
+#
+# 【使用前必读】请在仓库 Settings → Secrets → Actions 中配置：
+#   PROXY  - 代理节点链接，格式参考如下：
+#            hysteria2://密码@服务器:端口?sni=域名
+#            vless://UUID@服务器:端口?security=tls&sni=域名&type=ws
+#            vmess://Base64编码字符串
+#            trojan://密码@服务器:端口?sni=域名
+#            socks5://用户名:密码@服务器:端口
+#            socks5://服务器:端口  （无账号密码）
+#   ACOUNT - 要登录的账号信息（格式由你的 auto_login.py 决定）
+# =====================================================================
+
 name: 多账号自动登录续期任务
 
 on:
+  # 定时触发：每天 UTC 00:00 自动运行（北京时间 08:00）
   schedule:
     - cron: '0 0 * * *'
+  # 手动触发：可在 Actions 页面点击 "Run workflow" 按钮
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 10  # 超过 10 分钟自动终止，防止卡死浪费资源
 
     steps:
+      # ------------------------------------------------------------------
+      # 步骤 1：拉取你的代码仓库到运行器
+      # ------------------------------------------------------------------
       - name: 获取代码仓库
         uses: actions/checkout@v3
 
+      # ------------------------------------------------------------------
+      # 步骤 2：安装 Python 3.10 运行环境
+      # ------------------------------------------------------------------
       - name: 配置 Python 环境
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
+      # ------------------------------------------------------------------
+      # 步骤 3：安装自动化脚本所需的 Python 第三方库
+      # ------------------------------------------------------------------
       - name: 安装 Python 依赖包
         run: |
-          pip install seleniumbase ddddocr PyAutoGUI >> init_env.log 2>&1
+          # > 将日志写入 init_env.log，方便后续排查问题
+          pip install seleniumbase ddddocr PyAutoGUI > init_env.log 2>&1
 
-      - name: 启动全能代理核心 (原生支持 VLESS/VMESS/Socks5)
+      # ------------------------------------------------------------------
+      # 步骤 4：核心步骤 —— 自动识别协议类型，启动对应代理客户端
+      #
+      # 【设计思路】
+      # 无论使用哪种协议，最终都在本地暴露一个 SOCKS5 代理：
+      #   127.0.0.1:10808
+      # 后续步骤只需无脑连接这个地址，无需关心底层协议。
+      # ------------------------------------------------------------------
+      - name: 🚀 智能识别协议并启动代理客户端
         env:
-          proxy: ${{ secrets.PROXY }}
+          proxy: ${{ secrets.PROXY }}  # 从仓库 Secrets 中读取代理链接
         run: |
-          # 1. 仅下载代理核心 (Mihomo)
-          wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz >> init_env.log 2>&1
-          gunzip mihomo.gz >> init_env.log 2>&1
-          chmod +x mihomo
+          # ============================================================
+          # 【第一步】提取协议类型
+          # 原理：取 "://" 之前的部分，转为小写
+          # 例如：hysteria2://xxx → PROTOCOL=hysteria2
+          #        VLESS://xxx    → PROTOCOL=vless
+          # ============================================================
+          PROTOCOL=$(echo "$proxy" | sed 's|://.*||' | tr '[:upper:]' '[:lower:]')
+          echo ">>> 检测到代理协议类型: [$PROTOCOL]"
 
-          if [ -z "$proxy" ]; then
-            echo "❌ 严重错误：未提取到节点链接！" >> init_env.log 2>&1
+          # ============================================================
+          # 【第二步】根据协议类型，下载对应客户端并生成配置
+          # ============================================================
+          case "$PROTOCOL" in
+
+          # ------------------------------------------------------------
+          # 协议一：Hysteria2（或简写 hy2）
+          # 客户端：apernet/hysteria（官方二进制）
+          # 配置格式：YAML
+          # URL 格式：hysteria2://密码@主机:端口?sni=域名&insecure=1
+          # ------------------------------------------------------------
+          hysteria2|hy2)
+            echo ">>> [Hysteria2] 正在下载官方客户端..."
+            wget -q "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64" \
+              -O ./proxy-client \
+              || { echo "❌ 下载失败！请检查 GitHub 是否可访问。"; exit 1; }
+            chmod +x ./proxy-client  # 赋予可执行权限
+
+            # 用 sed 从 URL 中提取各字段
+            # 提取认证密码（@ 符号之前的部分）
+            AUTH=$(echo "$proxy" | sed -n 's|.*://\([^@]*\)@.*|\1|p' || true)
+            # 提取服务器地址和端口（@ 到 ? 之间的部分）
+            SERVER=$(echo "$proxy" | sed -n 's|.*@\([^/?#]*\).*|\1|p' || true)
+            # 提取 sni 参数（如果没有则用服务器主机名代替）
+            SNI=$(echo "$proxy" | grep -oP 'sni=\K[^&#]*' || echo "$SERVER" | sed 's|:.*||')
+
+            # 关键参数缺失时，给出明确错误提示
+            if [ -z "$SERVER" ]; then
+              echo "❌ 无法从 PROXY 中提取服务器地址！"
+              echo "👉 正确格式示例：hysteria2://your_password@your.server.com:443?sni=your.server.com"
+              exit 1
+            fi
+
+            # 生成 Hysteria2 YAML 配置文件
+            cat > proxy-config.yaml << YAML_EOF
+server: $SERVER         # 远端服务器地址（含端口）
+auth: $AUTH             # 认证密码
+tls:
+  sni: $SNI             # TLS SNI（服务器名称指示）
+  insecure: true        # 跳过证书验证（自签名证书必须开启）
+socks5:
+  listen: 127.0.0.1:10808  # 在本地开启 SOCKS5 代理
+YAML_EOF
+
+            echo ">>> 配置摘要（密码已隐藏）：Server=$SERVER  SNI=$SNI"
+            echo ">>> 正在后台启动 Hysteria2 客户端..."
+            # nohup：让进程在后台持续运行，不受终端退出影响
+            # & ：表示在后台运行
+            nohup ./proxy-client client -c proxy-config.yaml > proxy.log 2>&1 &
+            ;;
+
+          # ------------------------------------------------------------
+          # 协议二：SOCKS5
+          # 策略：使用 gost 工具在本地建立一个"中继隧道"
+          #        本地 10808 → 远端 SOCKS5 服务器
+          #        这样后续步骤无需修改，统一连接 127.0.0.1:10808
+          # URL 格式：socks5://用户名:密码@主机:端口
+          #           socks5://主机:端口（无账号）
+          # ------------------------------------------------------------
+          socks5)
+            echo ">>> [SOCKS5] 正在安装 gost 中继工具..."
+
+            # 通过 GitHub API 动态获取 gost 最新版的下载地址
+            # 好处：自动跟进新版本，无需手动更新 URL
+            GOST_URL=$(curl -fsSL "https://api.github.com/repos/go-gost/gost/releases/latest" \
+              | grep "browser_download_url" \
+              | grep "linux_amd64.tar.gz" \
+              | grep -v "sha256" \
+              | head -1 \
+              | cut -d'"' -f4)
+
+            if [ -z "$GOST_URL" ]; then
+              echo "❌ 获取 gost 下载链接失败！GitHub API 可能被限速，请稍后重试。"
+              exit 1
+            fi
+
+            echo ">>> 下载地址：$GOST_URL"
+            wget -q "$GOST_URL" -O gost.tar.gz
+            # 解压并查找 gost 可执行文件（不同版本目录结构可能不同）
+            tar -xzf gost.tar.gz
+            GOST_BIN=$(find . -maxdepth 3 -name "gost" -type f | head -1)
+            if [ -z "$GOST_BIN" ]; then
+              echo "❌ 解压后找不到 gost 可执行文件，请检查下载的包。"
+              exit 1
+            fi
+            chmod +x "$GOST_BIN"
+
+            echo ">>> gost 安装完成，路径：$GOST_BIN"
+            echo ">>> 启动本地中继：127.0.0.1:10808 → 远端 SOCKS5..."
+            # -L：本地监听地址（我们开在 10808）
+            # -F：转发目标（远端 SOCKS5，完整 URL 含认证信息）
+            nohup "$GOST_BIN" -L "socks5://127.0.0.1:10808" -F "$proxy" > proxy.log 2>&1 &
+            ;;
+
+          # ------------------------------------------------------------
+          # 协议三：VMess / VLESS / Trojan
+          # 客户端：Xray-core（同时支持三种协议，无需重复下载）
+          # 配置格式：JSON（由内嵌 Python 脚本动态生成）
+          # ------------------------------------------------------------
+          vmess|vless|trojan)
+            echo ">>> [$PROTOCOL] 正在下载 Xray 内核..."
+            wget -q "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" \
+              -O xray.zip \
+              || { echo "❌ Xray 下载失败！请检查 GitHub 是否可访问。"; exit 1; }
+
+            # 解压到 ./xray/ 目录（zip 包内含 xray 可执行文件、地理数据库等）
+            unzip -q xray.zip -d xray
+            chmod +x ./xray/xray
+            echo ">>> Xray 内核安装完成。"
+
+            echo ">>> 使用 Python 解析 [$PROTOCOL] 链接，动态生成 Xray 配置..."
+            # 注意：这里的 heredoc 使用 'PYTHON_EOF'（带引号），
+            # 目的是让 Shell 不提前展开 Python 代码里的 $ 变量，
+            # 避免 $server、$protocol 等被 Shell 误当变量替换。
+            python3 << 'PYTHON_EOF'
+import sys, json, base64, os
+from urllib.parse import urlparse, parse_qs, unquote
+
+# 从 Shell 环境变量中读取代理链接（已在 env: 块注入）
+proxy = os.environ.get('proxy', '').strip()
+if not proxy:
+    print("❌ 环境变量 proxy 为空！请检查 Secrets 配置。", file=sys.stderr)
+    sys.exit(1)
+
+parsed   = urlparse(proxy)
+protocol = parsed.scheme.lower()
+
+# -----------------------------------------------------------
+# Xray 入站（Inbound）配置：固定在本地 10808 开一个 SOCKS5 代理
+# 所有协议统一从这里出流量，后续步骤无需改动
+# -----------------------------------------------------------
+inbound_socks = {
+    "tag": "socks-in",
+    "port": 10808,
+    "listen": "127.0.0.1",
+    "protocol": "socks",
+    "settings": {
+        "auth": "noauth",  # 本地代理无需认证
+        "udp": True        # 开启 UDP 支持（某些应用需要）
+    }
+}
+
+
+def build_stream_settings(params, net_type, security, sni, server):
+    """
+    根据传输协议类型和安全层，生成 Xray streamSettings 配置。
+
+    参数说明：
+      params   - URL 查询参数字典（parse_qs 解析结果）
+      net_type - 传输协议：tcp / ws / grpc / h2
+      security - 安全层：none / tls / reality
+      sni      - TLS 服务器名称（Server Name Indication）
+      server   - 服务器主机名（sni 缺省时的备选值）
+    """
+    ss = {"network": net_type}
+
+    # ——— 安全层配置（TLS 或 Reality）———
+    if security == 'tls':
+        ss["security"] = "tls"
+        ss["tlsSettings"] = {
+            "serverName": sni,
+            "allowInsecure": True  # 允许自签名证书（生产环境建议改为 False）
+        }
+    elif security == 'reality':
+        # Reality 是 VLESS 的高级伪装方案，需要额外参数
+        ss["security"] = "reality"
+        ss["realitySettings"] = {
+            "serverName": sni,
+            "fingerprint": params.get('fp', ['chrome'])[0],  # TLS 指纹
+            "publicKey":   params.get('pbk', [''])[0],       # 服务器公钥
+            "shortId":     params.get('sid', [''])[0]        # 短 ID
+        }
+
+    # ——— 传输层配置（根据 type 参数决定）———
+    if net_type == 'ws':
+        # WebSocket 传输：常用于走 CDN（CloudFlare 等）
+        ss["wsSettings"] = {
+            "path": unquote(params.get('path', ['/'])[0]),           # WS 路径
+            "headers": {"Host": params.get('host', [server])[0]}     # Host 头
+        }
+    elif net_type == 'grpc':
+        # gRPC 传输：高性能，常用于绕过 QoS
+        ss["grpcSettings"] = {
+            "serviceName": params.get('serviceName', [''])[0]
+        }
+    elif net_type == 'h2':
+        # HTTP/2 传输
+        ss["httpSettings"] = {
+            "host": [params.get('host', [server])[0]],
+            "path": params.get('path', ['/'])[0]
+        }
+    elif net_type == 'tcp':
+        # TCP 传输，可选 HTTP 伪装头
+        if params.get('headerType', ['none'])[0] == 'http':
+            ss["tcpSettings"] = {"header": {"type": "http"}}
+
+    return ss
+
+
+# ============================================================
+# 根据协议类型，分别解析 URL 并构建 Xray 出站（Outbound）配置
+# ============================================================
+outbound = None
+
+# ---------- VLESS ----------
+# URL 格式：vless://UUID@主机:端口?security=tls&sni=域名&type=ws&path=/xxx
+# 文档：https://xtls.github.io/config/outbounds/vless.html
+if protocol == 'vless':
+    params   = parse_qs(parsed.query)
+    net_type = params.get('type', ['tcp'])[0]
+    security = params.get('security', ['none'])[0]
+    sni      = params.get('sni', [parsed.hostname])[0]
+    # flow 字段：VLESS + Reality 时需要设为 'xtls-rprx-vision'
+    flow     = params.get('flow', [''])[0]
+
+    outbound = {
+        "protocol": "vless",
+        "settings": {
+            "vnext": [{
+                "address": parsed.hostname,
+                "port": parsed.port,
+                "users": [{
+                    "id": parsed.username,   # UUID
+                    "encryption": "none",    # VLESS 固定 none
+                    "flow": flow
+                }]
+            }]
+        },
+        "streamSettings": build_stream_settings(params, net_type, security, sni, parsed.hostname)
+    }
+
+# ---------- VMess ----------
+# URL 格式：vmess://BASE64字符串
+# BASE64 解码后是包含所有参数的 JSON 对象
+elif protocol == 'vmess':
+    b64 = proxy[8:]  # 去掉 "vmess://" 前缀，剩下纯 Base64 部分
+    # Base64 要求长度是 4 的倍数，不足时补 = 号
+    b64 += '=' * (-len(b64) % 4)
+
+    try:
+        vmess = json.loads(base64.b64decode(b64).decode('utf-8'))
+    except Exception as e:
+        print(f"❌ VMess 链接 Base64 解码失败，请确认链接完整无截断：{e}", file=sys.stderr)
+        sys.exit(1)
+
+    server   = vmess.get('add', '')       # 服务器主机名
+    port     = int(vmess.get('port', 443))
+    uuid     = vmess.get('id', '')        # 用户 UUID
+    alter_id = int(vmess.get('aid', 0))   # alterId，新版推荐填 0
+    net_type = vmess.get('net', 'tcp')
+    security = 'tls' if vmess.get('tls') == 'tls' else 'none'
+    # sni 可能存在于 sni 或 host 字段，都没有就用主机名
+    sni      = vmess.get('sni') or vmess.get('host') or server
+
+    # 将 VMess JSON 字段统一成 parse_qs 格式，复用 build_stream_settings
+    params_like = {
+        'path':       [vmess.get('path', '/')],
+        'host':       [vmess.get('host', server)],
+        'serviceName':[vmess.get('path', '')],      # gRPC 情形
+        'headerType': [vmess.get('type', 'none')]   # TCP 伪装类型
+    }
+
+    outbound = {
+        "protocol": "vmess",
+        "settings": {
+            "vnext": [{
+                "address": server,
+                "port": port,
+                "users": [{
+                    "id": uuid,
+                    "alterId": alter_id,
+                    "security": "auto"  # 自动选择最优加密方式
+                }]
+            }]
+        },
+        "streamSettings": build_stream_settings(params_like, net_type, security, sni, server)
+    }
+
+# ---------- Trojan ----------
+# URL 格式：trojan://密码@主机:端口?sni=域名&type=tcp
+# Trojan 天然走 TLS，所以 security 默认值是 tls
+elif protocol == 'trojan':
+    params   = parse_qs(parsed.query)
+    net_type = params.get('type', ['tcp'])[0]
+    security = params.get('security', ['tls'])[0]  # Trojan 默认 TLS
+    sni      = params.get('sni', [parsed.hostname])[0]
+
+    outbound = {
+        "protocol": "trojan",
+        "settings": {
+            "servers": [{
+                "address": parsed.hostname,
+                "port": parsed.port,
+                "password": parsed.username  # Trojan 用密码认证（非 UUID）
+            }]
+        },
+        "streamSettings": build_stream_settings(params, net_type, security, sni, parsed.hostname)
+    }
+
+# ——— 生成最终 Xray 配置文件 ———
+if outbound is None:
+    print(f"❌ 内部错误：协议 [{protocol}] 生成出站配置失败！", file=sys.stderr)
+    sys.exit(1)
+
+xray_config = {
+    "log": {"loglevel": "warning"},  # 日志级别：warning（减少噪音）
+    "inbounds": [inbound_socks],
+    "outbounds": [
+        outbound,
+        # 直连出站（备用，避免 Xray 报错找不到出站）
+        {"protocol": "freedom", "tag": "direct"}
+    ]
+}
+
+# 写入 JSON 配置文件
+with open('xray-config.json', 'w', encoding='utf-8') as f:
+    json.dump(xray_config, f, indent=2, ensure_ascii=False)
+
+# 打印成功摘要（故意不打印密码/UUID，保护隐私）
+servers_list = (
+    outbound['settings'].get('vnext')   # vless / vmess 用 vnext
+    or outbound['settings'].get('servers')  # trojan 用 servers
+    or []
+)
+if servers_list:
+    addr = servers_list[0].get('address', '?')
+    port = servers_list[0].get('port', '?')
+    print(f"✅ xray-config.json 生成成功！服务器: {addr}:{port}")
+PYTHON_EOF
+
+            # 检查 Python 是否成功生成了配置文件
+            if [ ! -f "xray-config.json" ]; then
+              echo "❌ xray-config.json 生成失败！请查看上方 Python 错误输出。"
+              exit 1
+            fi
+
+            echo ">>> 正在后台启动 Xray 代理..."
+            nohup ./xray/xray run -c xray-config.json > proxy.log 2>&1 &
+            ;;
+
+          # ------------------------------------------------------------
+          # 未识别的协议：明确报错，列出支持列表
+          # ------------------------------------------------------------
+          *)
+            echo "❌ 不支持的协议类型: [$PROTOCOL]"
+            echo ""
+            echo "👉 当前支持以下协议（请修改 Secrets 中的 PROXY 为对应格式）："
+            echo "   ● hysteria2 → hysteria2://密码@主机:端口?sni=域名"
+            echo "   ● hy2       → hy2://密码@主机:端口?sni=域名"
+            echo "   ● socks5    → socks5://用户:密码@主机:端口"
+            echo "   ● vmess     → vmess://Base64字符串"
+            echo "   ● vless     → vless://UUID@主机:端口?security=tls&sni=域名&type=ws"
+            echo "   ● trojan    → trojan://密码@主机:端口?sni=域名"
             exit 1
-          fi
+            ;;
+          esac
 
-          # 2. 使用 Python 将节点链接打包成标准的 Base64 订阅格式
-          cat << 'EOF' > encode_node.py
-          import os
-          import base64
-          url = os.environ.get('proxy', '').strip()
-          if '#' not in url:
-              url += '#MyNode'
-          b64 = base64.b64encode(url.encode('utf-8')).decode('utf-8')
-          with open('node.txt', 'w', encoding='utf-8') as f:
-              f.write(b64)
-          EOF
-          python -u encode_node.py
-
-          # 3. 启动本地微型网页服务器下发订阅
-          python -m http.server 8080 > http.log 2>&1 &
-          HTTP_PID=$!
-          sleep 2
-
-          # 4. 生成代理核心配置文件 (已修复本地流量套娃死循环)
-          cat << 'EOF' > config.yaml
-          mixed-port: 10808
-          mode: rule
-          log-level: debug
-          
-          proxy-providers:
-            my-provider:
-              type: http
-              url: "http://127.0.0.1:8080/node.txt"
-              path: ./provider.yaml
-              interval: 3600
-          
-          # 使用 fallback 自动测试并选择可用节点
-          proxy-groups:
-            - name: PROXY
-              type: fallback
-              url: 'http://cp.cloudflare.com/generate_204'
-              interval: 300
-              use:
-                - my-provider
-          
-          rules:
-            # 必须：防止代理软件去代理本地的 8080 端口造成死循环
-            - IP-CIDR,127.0.0.0/8,DIRECT
-            - MATCH,PROXY
-          EOF
-
-          # 5. 后台启动 Mihomo 接管网络
-          nohup ./mihomo -f config.yaml > proxy.log 2>&1 &
-          
-          # 给代理核心 5 秒钟的时间去下载和解析
+          # ============================================================
+          # 【第三步】等待代理客户端完成初始化（约需 3-5 秒热身）
+          # ============================================================
+          echo ">>> ⏳ 等待代理客户端初始化完毕..."
           sleep 5
-          kill $HTTP_PID || true
+          echo "✅ 代理启动完成！所有协议统一监听：127.0.0.1:10808"
 
-      - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
+      # ------------------------------------------------------------------
+      # 步骤 5：验证代理连通性，然后运行自动化登录脚本
+      # ------------------------------------------------------------------
+      - name: 运行自动化脚本（全局接管网络 + 虚拟屏幕）
         env:
           acount: ${{ secrets.ACOUNT }}
-          HTTP_PROXY: socks5://127.0.0.1:10808
+          # 所有协议在上一步已统一暴露为本地 SOCKS5，此处无需修改
+          HTTP_PROXY:  socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          # 6. 直接进行最终连通性测试！
-          echo ">>> 正在测试代理节点连通性..."
-          curl -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10 >> init_env.log 2>&1 || {
-            echo "❌ 代理连接失败，节点可能已失效或无法连通。底层日志如下："
+          # 【连通性测试】用 curl 通过代理访问百度，验证代理是否正常工作
+          # 如果超时或失败，打印底层代理日志帮助排查
+          curl -x socks5://127.0.0.1:10808 \
+               -I https://www.baidu.com \
+               --connect-timeout 10 \
+               >> init_env.log 2>&1 \
+          || {
+            echo "❌ 代理连接失败！正在打印底层日志帮助排查..."
+            echo "================ 代理客户端运行日志 ================"
             cat proxy.log
+            echo "====================================================="
             exit 1
           }
-          
+
+          # 安装虚拟显示器（Selenium 需要图形界面）和中文字体
           sudo apt-get update >> init_env.log 2>&1
           sudo apt-get install -y xvfb fonts-noto-cjk >> init_env.log 2>&1
-          
-          echo ">>> 🚀 代理连接成功！开始执行 Python 业务脚本..."
+
+          echo ">>> 🚀 开始执行自动登录 Python 脚本..."
+          # xvfb-run：创建一个虚拟 1920x1080 屏幕给浏览器使用
+          # -u：Python 不缓冲输出，日志实时可见
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
-      - name: 上传运行日志与截图
+      # ------------------------------------------------------------------
+      # 步骤 6：无论成功或失败，都上传截图和日志供事后分析
+      # if: always() 表示即使前面步骤出错也执行此步骤
+      # ------------------------------------------------------------------
+      - name: 上传运行截图与日志
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -120,4 +482,4 @@ jobs:
             screenshots/
             init_env.log
             proxy.log
-          retention-days: 7
+          retention-days: 7  # 保存 7 天后自动删除，节省存储空间
