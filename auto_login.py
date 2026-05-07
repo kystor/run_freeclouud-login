@@ -36,9 +36,13 @@ CONFIG = {
     "modal_pay_btn_selector": 'button.pay-now'                
 }
 
+# 确保截图文件夹存在
 os.makedirs("screenshots", exist_ok=True)
 
 def take_screenshot(sb, step_name, username="system"):
+    """
+    保存截图的辅助工具，会将用户名和步骤拼接作为文件名
+    """
     safe_name = username.replace("@", "_").replace(".", "_")
     filepath = f"screenshots/{safe_name}_{step_name}.png"
     try:
@@ -51,6 +55,9 @@ def take_screenshot(sb, step_name, username="system"):
 # 2. Cloudflare 绕过辅助函数 
 # ==========================================
 def is_cloudflare_interstitial(sb) -> bool:
+    """
+    判断当前页面是否处于 Cloudflare 5秒盾拦截状态
+    """
     try:
         page_source = sb.get_page_source()
         title = sb.get_title().lower() if sb.get_title() else ""
@@ -68,10 +75,14 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
+    """
+    尝试绕过 CF 盾，默认尝试 4 次。成功返回 True，失败返回 False。
+    """
     print("    🛡️ 检测到 CF 5秒盾，准备破除...")
     for attempt in range(max_attempts):
         print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
         try:
+            # 使用 SeleniumBase 内置的 GUI 点击工具来突破验证
             sb.uc_gui_click_captcha()
             time.sleep(6)
             if not is_cloudflare_interstitial(sb):
@@ -83,6 +94,9 @@ def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
     return False
 
 def handle_turnstile_verification(sb) -> bool:
+    """
+    处理可能出现的 Turnstile 验证码（类似复选框或隐藏的无感验证）
+    """
     try:
         cookie_btn = 'button[data-cky-tag="accept-button"]'
         if sb.is_element_visible(cookie_btn):
@@ -178,10 +192,26 @@ def process_single_account(username, password):
             take_screenshot(sb, "Error_1005_节点被封锁", username)
             sys.exit(1)
 
+        # ==================== 修改核心逻辑 ====================
+        # 第一层判断：是否遇到了 CF 拦截
         if is_cloudflare_interstitial(sb):
+            # 第一次尝试绕过（4次尝试）
             if not bypass_cloudflare_interstitial(sb):
-                return 
+                print("    ⚠️ 首次绕过 CF 盾失败，正在刷新页面重新尝试...")
+                sb.refresh() # 刷新网页重来
+                time.sleep(5)
+                
+                # 刷新后再次判断是否还有 CF 盾
+                if is_cloudflare_interstitial(sb):
+                    # 第二次尝试绕过（又是4次尝试）
+                    if not bypass_cloudflare_interstitial(sb):
+                        print("    🚨 致命错误：刷新网页后再次破盾失败！退出整个程序。")
+                        take_screenshot(sb, "Error_CF破盾彻底失败", username)
+                        # 使用 sys.exit(1) 直接杀死整个脚本，这会让 GitHub Actions 直接报错变红，不会去跑后面的账号！
+                        sys.exit(1)
+                        
             time.sleep(3) 
+        # ======================================================
             
         handle_turnstile_verification(sb)
         time.sleep(3)
@@ -232,7 +262,6 @@ def process_single_account(username, password):
                 sb.clear(CONFIG['captcha_input_selector'])
                 sb.type(CONFIG['captcha_input_selector'], captcha_text)
                 
-                # 记录点击登录前的表单填写状态
                 take_screenshot(sb, "03_填写账号和验证码", username)
                 
                 sb.click(CONFIG['login_btn_selector'])
@@ -241,7 +270,6 @@ def process_single_account(username, password):
                 if sb.is_element_present(CONFIG['user_center_selector']):
                     login_success = True
                     print(f"    📄 登录验证成功！当前页面: {sb.get_title()}")
-                    # 记录成功进入用户中心的状态
                     take_screenshot(sb, "04_登录成功_用户中心", username)
                     break 
                 else:
@@ -284,7 +312,6 @@ def process_single_account(username, password):
                 sb.clear(CONFIG['math_input_selector']) 
                 sb.type(CONFIG['math_input_selector'], str(final_answer))
                 
-                # 提交签到前记录填写的答案
                 take_screenshot(sb, "06_填写签到算术答案", username)
                 sb.click(CONFIG['verify_btn_selector'])
                 
@@ -292,7 +319,6 @@ def process_single_account(username, password):
                 popup_msg = sb.get_text(CONFIG['popup_content_selector'])
                 print(f"    🔔 签到系统提示: 【{popup_msg}】")
                 
-                # 记录签到成功或失败的弹窗提示内容
                 take_screenshot(sb, "07_签到结果弹窗", username)
                 
                 sb.click(CONFIG['popup_confirm_btn_selector'])
@@ -302,7 +328,6 @@ def process_single_account(username, password):
                 sb.refresh()
                 time.sleep(4)
                 
-                # 记录刷新后的最新积分状态
                 take_screenshot(sb, "08_刷新获取最新积分", username)
                 
                 try:
@@ -342,7 +367,6 @@ def process_single_account(username, password):
                     print("    ▶ 正在生成续费订单...")
                     sb.wait_for_element(CONFIG['confirm_renew_btn_selector'], timeout=10)
                     
-                    # 记录准备点击续费的订单页面
                     take_screenshot(sb, "10_生成续费订单页", username)
                     
                     sb.js_click(CONFIG['confirm_renew_btn_selector']) 
@@ -351,7 +375,6 @@ def process_single_account(username, password):
                     print("    ▶ 已调起支付面板，等待确认...")
                     sb.wait_for_element(CONFIG['order_pay_btn_selector'], timeout=15)
                     
-                    # 记录收银台选择支付方式的页面
                     take_screenshot(sb, "11_调起支付收银台", username)
                     
                     sb.js_click(CONFIG['order_pay_btn_selector']) 
@@ -361,7 +384,6 @@ def process_single_account(username, password):
                     print("    ▶ 💸 已在弹窗中确认支付，正在等待系统处理并跳转...")
                     
                     time.sleep(8) 
-                    # 记录支付完成后的详情页面
                     take_screenshot(sb, "12_支付完成详情页", username)
                     
                     try:
@@ -377,7 +399,6 @@ def process_single_account(username, password):
                     sb.open(CONFIG['sign_in_url'])
                     time.sleep(4)
                     
-                    # 最终闭环的积分核对截图
                     take_screenshot(sb, "13_最终核对积分页", username)
                     
                     try:
