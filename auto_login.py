@@ -52,7 +52,7 @@ def take_screenshot(sb, step_name, username="system"):
         print(f"    ⚠️ 截图失败 ({filepath}): {e}")
 
 # ==========================================
-# 2. Cloudflare (CF) 绕过辅助函数 
+# 2. Cloudflare (CF) 绕过辅助函数 (已为你全面优化)
 # ==========================================
 def is_cloudflare_interstitial(sb) -> bool:
     """检测当前页面是否处于 CF 5秒盾拦截状态"""
@@ -74,22 +74,35 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
-    """尝试通过模拟点击绕过 CF 5秒盾 (坐标精准强化版)"""
+    """尝试绕过 CF 5秒盾 (专为 GitHub Actions 等云端环境优化的底层点击版)"""
     print("    🛡️ 检测到 CF 5秒盾，准备破除...")
     for attempt in range(max_attempts):
         print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
         try:
-            # 多等几秒，确保那个框框完全加载出来
+            # 多等几秒，确保那个验证码框框完全加载出来
             time.sleep(3)
             
-            # 【关键修复 2】强制把网页滚动条拉到最顶部、最左边，防止坐标偏移
-            sb.execute_script("window.scrollTo(0, 0);")
+            # 【核心优化 1】强制锁定浏览器窗口位置和大小，防止在云端虚拟屏幕中产生坐标偏移
+            sb.set_window_rect(0, 0, 1920, 1080)
             time.sleep(1)
 
-            # 调用物理鼠标进行点击
-            sb.uc_gui_click_captcha()
-            time.sleep(6)
+            # CF 的小框框通常藏在一个叫做 iframe 的网页“画中画”里面
+            # 我们通过 CSS 选择器精准定位这个 iframe
+            iframe_selector = 'iframe[src*="cloudflare"], iframe[src*="turnstile"]'
             
+            if sb.is_element_present(iframe_selector):
+                print("      🎯 找到验证码框架，正在使用底层 CDP 协议发送精准点击...")
+                # 【核心优化 2】放弃不稳定的物理鼠标点击 (uc_gui_click_captcha)
+                # 改用 uc_click，它直接通过浏览器底层接口告诉网页“我点了这个中心点”
+                sb.uc_click(iframe_selector)
+                time.sleep(6)
+            else:
+                print("      ⚠️ 未找到验证码框架特征，尝试使用备用物理鼠标点击...")
+                # 万一没找到 iframe，再用物理鼠标去屏幕上乱点试试运气 (兜底方案)
+                sb.uc_gui_click_captcha()
+                time.sleep(6)
+            
+            # 检查是否成功绕过
             if not is_cloudflare_interstitial(sb):
                 print("      ✅ CF 5秒盾已通过！")
                 return True
@@ -97,15 +110,16 @@ def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
             print(f"      ⚠️ 点击过程遇到小问题: {e}")
             pass
             
-        print("      🔄 鼠标似乎没点中，刷新页面重置坐标状态...")
+        print("      🔄 似乎没点中，或者网页卡住了，刷新页面重置状态...")
         sb.refresh()
         time.sleep(5)
         
     return False
 
 def handle_turnstile_verification(sb) -> bool:
-    """处理可能出现的 Turnstile (人机验证) 模块"""
+    """处理页面中嵌入的 Turnstile (人机验证) 模块"""
     try:
+        # 很多欧洲网站会有同意 Cookie 的弹窗，先关掉它，防止挡住验证码
         cookie_btn = 'button[data-cky-tag="accept-button"]'
         if sb.is_element_visible(cookie_btn):
             sb.click(cookie_btn)
@@ -113,7 +127,7 @@ def handle_turnstile_verification(sb) -> bool:
     except:
         pass
 
-    # 尝试把验证码模块滚动到屏幕中央，方便点击
+    # 尝试把验证码模块滚动到屏幕中央，防止它在屏幕外面点不到
     sb.execute_script('''
         try {
             var t = document.querySelector('.cf-turnstile') || 
@@ -124,6 +138,7 @@ def handle_turnstile_verification(sb) -> bool:
     ''')
     time.sleep(2)
 
+    # 找找看页面里到底有没有验证码
     has_turnstile = False
     for _ in range(15):
         if (sb.is_element_present('iframe[src*="challenges.cloudflare"]') or 
@@ -135,23 +150,30 @@ def handle_turnstile_verification(sb) -> bool:
         time.sleep(1)
 
     if not has_turnstile:
-        print("    🟢 无感验证通过 (未发现 Turnstile)")
+        print("    🟢 无感验证通过 (当前页面未发现 Turnstile 验证码)")
         return True
 
-    print("    🧩 发现验证码，执行拟人点击...")
+    print("    🧩 发现 Turnstile 验证码，准备执行拟人点击...")
     verified = False
+    
+    # 同样使用稳定的底层点击
+    iframe_selector = 'iframe[src*="cloudflare"], iframe[src*="turnstile"]'
     
     for attempt in range(1, 4):
         try:
-            sb.uc_gui_click_captcha()
+            if sb.is_element_present(iframe_selector):
+                sb.uc_click(iframe_selector)
+            else:
+                sb.uc_gui_click_captcha()
         except:
             pass
             
+        # 循环检查验证码是否已经生成了验证成功的 Token (凭证)
         for _ in range(10):
             if sb.is_element_present('input[name="cf-turnstile-response"]'):
                 token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
                 if token and len(token) > 20:
-                    print("      ✅ 物理点击成功，已获取 Token！")
+                    print("      ✅ 验证码点击成功，已获取系统 Token！")
                     verified = True
                     break
             time.sleep(1)
@@ -159,13 +181,13 @@ def handle_turnstile_verification(sb) -> bool:
         if verified:
             break
 
-    # 兜底机制：即使没有点击成功，有些时候 CF 会自动放行，我们多等一会儿
+    # 兜底机制：即使没有点击成功，有些时候我们挂机等一会儿，CF 会认为我们是真的用户，自动放行
     if not verified:
         for _ in range(30):
             if sb.is_element_present('input[name="cf-turnstile-response"]'):
                 token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
                 if token and len(token) > 20:
-                    print("      ✅ 验证码自动放行，已获取 Token！")
+                    print("      ✅ 验证码自动放行，已获取系统 Token！")
                     verified = True
                     break
             time.sleep(1)
@@ -188,7 +210,7 @@ def process_single_account(username, password):
         uc=True,            # 开启反检测模式 (必须)
         test=True,          # 隐藏一些测试条
         locale="en-US",     # 伪装成英文浏览器环境
-        headless=False,     # 保持 False！在 GitHub Actions 中会用 Xvfb 创建虚拟屏幕，让它以为有显示器
+        headless=False,     # 保持 False！在 GitHub Actions 中会用 Xvfb 创建虚拟屏幕
         proxy=env_proxy,    # 走我们设定的代理 IP
         chromium_arg=[
             "--disable-blink-features=AutomationControlled", # 去掉自动化标识
@@ -204,7 +226,7 @@ def process_single_account(username, password):
         # 使用带有重连功能的访问，防止因为代理网络波动导致打不开
         sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
         
-        # 【关键修复 1】强制最大化窗口！保证虚拟屏幕和浏览器窗口 100% 重合
+        # 强制最大化窗口！保证虚拟屏幕和浏览器窗口 100% 重合
         sb.maximize_window()
         time.sleep(4)
         
@@ -217,10 +239,10 @@ def process_single_account(username, password):
             take_screenshot(sb, "Error_1005_节点被封锁", username)
             sys.exit(1) # IP 都被拉黑了，直接强制终止程序
 
-        # 【核心修改点1：处理 CF 破盾失败】
+        # 【开始处理 Cloudflare 拦截】
         if is_cloudflare_interstitial(sb):
             if not bypass_cloudflare_interstitial(sb):
-                # 破盾失败，不再使用 return 跳过，而是直接让程序报错并退出
+                # 破盾失败，直接让程序报错并退出，方便你排查
                 print("    🚨 致命错误：无法绕过 Cloudflare 5秒盾，程序将立即终止运行！")
                 take_screenshot(sb, "Error_CF破盾失败彻底卡死", username)
                 sys.exit(1) 
@@ -239,7 +261,7 @@ def process_single_account(username, password):
                 
                 captcha_success = False 
                 
-                # 开始识别验证码图片
+                # 开始识别图片验证码
                 for captcha_attempt in range(10): 
                     sb.wait_for_element(CONFIG['captcha_img_selector'], timeout=10)
                     img_src = sb.get_attribute(CONFIG['captcha_img_selector'], "src")
@@ -295,9 +317,7 @@ def process_single_account(username, password):
                     sb.refresh() 
                     time.sleep(3)
             
-            # 【核心修改点2：处理登录失败】
             if not login_success:
-                # 如果连续重试了都不行，使用 sys.exit(1) 强制中断整个 GitHub Actions 流程并报错
                 print("    🚨 致命错误：两次登录尝试均未成功！可能是网站风控或账号密码错误。程序将立即终止运行！")
                 take_screenshot(sb, "Error_最终登录失败", username)
                 sys.exit(1)
@@ -352,7 +372,7 @@ def process_single_account(username, password):
                 
                 take_screenshot(sb, "08_刷新获取最新积分", username)
                 
-                # 提取页面上的积分数字并转为小数点数字，方便后面做比较
+                # 提取页面上的积分数字并转为小数，方便后面做比较
                 try:
                     balance_text = sb.get_text(CONFIG['points_balance_selector'])
                     print(f"    💰 当前账户原始信息: {balance_text}")
@@ -422,7 +442,7 @@ def process_single_account(username, password):
                     sb.open(CONFIG['sign_in_url'])
                     time.sleep(4)
                     
-                    take_screenshot(sb, "13_最终核针对积分页", username)
+                    take_screenshot(sb, "13_最终核准积分页", username)
                     
                     try:
                         final_balance_text = sb.get_text(CONFIG['points_balance_selector'])
@@ -439,10 +459,9 @@ def process_single_account(username, password):
                 print(f">>> 🛑 积分不足 (当前 {balance_value} < 2)，安全退出当前账号的后续操作！")
 
         except Exception as e:
-            # 如果中间任何一步代码报错（比如网卡了导致某个元素找不到），就会跳到这里
+            # 如果中间任何一步代码报错，就会跳到这里记录错误并退出
             print(f"    ❌ 账号处理或执行过程中出现错误: {e}")
             take_screenshot(sb, "Error_程序崩溃截图", username)
-            # 为了防止意外假死，我们在报错后也强制杀掉程序
             sys.exit(1)
 
 # ==========================================
@@ -454,10 +473,10 @@ def main():
     accounts_str = os.environ.get("acount")
     
     if not accounts_str:
-        print("⚠️ 未获取到名为 'acount' 的环境变量！")
+        print("⚠️ 未获取到名为 'acount' 的环境变量！请检查 GitHub Secrets 配置。")
         return
 
-    # 把字符串按逗号拆分成列表（支持多账号）
+    # 把字符串按逗号拆分成列表（支持多账号批量处理）
     account_list = accounts_str.split(',')
     print(f"📋 共检测到 {len(account_list)} 个账号。")
     
@@ -474,6 +493,6 @@ def main():
             
     print("\n🏁 所有队列任务已全部执行完成！")
 
-# 只要你是把这个文件当作主程序运行，就会执行 main() 函数
+# 这是 Python 脚本的标准入口：只要你是把这个文件当作主程序运行，就会自动执行 main() 函数
 if __name__ == "__main__":
     main()
