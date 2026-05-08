@@ -74,20 +74,33 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
-    """尝试通过模拟点击绕过 CF 5秒盾"""
+    """尝试通过模拟点击绕过 CF 5秒盾 (坐标精准强化版)"""
     print("    🛡️ 检测到 CF 5秒盾，准备破除...")
     for attempt in range(max_attempts):
         print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
         try:
-            # 使用 SeleniumBase 专门为 uc 模式设计的验证码点击功能
+            # 多等几秒，确保那个框框完全加载出来
+            time.sleep(3)
+            
+            # 【关键修复 2】强制把网页滚动条拉到最顶部、最左边，防止坐标偏移
+            sb.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+
+            # 调用物理鼠标进行点击
             sb.uc_gui_click_captcha()
             time.sleep(6)
+            
             if not is_cloudflare_interstitial(sb):
                 print("      ✅ CF 5秒盾已通过！")
                 return True
         except Exception as e:
+            print(f"      ⚠️ 点击过程遇到小问题: {e}")
             pass
-        time.sleep(3)
+            
+        print("      🔄 鼠标似乎没点中，刷新页面重置坐标状态...")
+        sb.refresh()
+        time.sleep(5)
+        
     return False
 
 def handle_turnstile_verification(sb) -> bool:
@@ -190,6 +203,9 @@ def process_single_account(username, password):
         print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
         # 使用带有重连功能的访问，防止因为代理网络波动导致打不开
         sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
+        
+        # 【关键修复 1】强制最大化窗口！保证虚拟屏幕和浏览器窗口 100% 重合
+        sb.maximize_window()
         time.sleep(4)
         
         take_screenshot(sb, "01_初始访问页面", username)
