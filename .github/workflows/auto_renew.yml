@@ -21,13 +21,13 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 安装系统底层图形依赖与中文字体
-        # 【优化核心】PyAutoGUI 在 Linux 下需要用到 scrot、python3-tk 等 X11 依赖
-        # 提前在这里把 xvfb 和字体也一起安装好，让环境准备更清晰
+        # 【修改说明】针对 Ubuntu 24.04，将原本的 libasound2 更新为 libasound2t64
         run: |
           (
             set -e
             sudo apt-get update
-            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2
+            # 这里是修复的核心，注意结尾的 libasound2t64
+            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2t64
           ) > apt_install.log 2>&1 || {
             echo "❌ 系统基础依赖安装失败，详细日志如下："
             cat apt_install.log
