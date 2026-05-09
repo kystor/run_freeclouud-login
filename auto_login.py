@@ -33,7 +33,7 @@ CONFIG = {
     "server_checkbox_selector": '.row-checkbox',              
     "list_renew_btn_selector": '#readBtn',                    
     "confirm_renew_btn_selector": '.xfSubmit',          
-    "order_pay_btn_selector": '#payamount',                   
+    "order_pay_btn_selector": '#payamount',                    
     "modal_pay_btn_selector": 'button.pay-now'                
 }
 
@@ -52,7 +52,7 @@ def take_screenshot(sb, step_name, username="system"):
         print(f"    ⚠️ 截图失败 ({filepath}): {e}")
 
 # ==========================================
-# 2. Cloudflare (CF) 绕过辅助函数 (已为你全面优化)
+# 2. Cloudflare (CF) 绕过辅助函数 
 # ==========================================
 def is_cloudflare_interstitial(sb) -> bool:
     """检测当前页面是否处于 CF 5秒盾拦截状态"""
@@ -65,7 +65,6 @@ def is_cloudflare_interstitial(sb) -> bool:
                 return True
         if "just a moment" in title or "attention required" in title:
             return True
-        # 检测网页正文内容如果特别少，且包含 cf 的域名，通常是被拦截了
         body_len = sb.execute_script('(function() { return document.body ? document.body.innerText.length : 0; })();')
         if body_len is not None and body_len < 200 and "challenges.cloudflare.com" in page_source:
             return True
@@ -74,35 +73,25 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
-    """尝试绕过 CF 5秒盾 (专为 GitHub Actions 等云端环境优化的底层点击版)"""
+    """尝试绕过 CF 5秒盾"""
     print("    🛡️ 检测到 CF 5秒盾，准备破除...")
     for attempt in range(max_attempts):
         print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
         try:
-            # 多等几秒，确保那个验证码框框完全加载出来
             time.sleep(3)
-            
-            # 【核心优化 1】强制锁定浏览器窗口位置和大小，防止在云端虚拟屏幕中产生坐标偏移
             sb.set_window_rect(0, 0, 1920, 1080)
             time.sleep(1)
 
-            # CF 的小框框通常藏在一个叫做 iframe 的网页“画中画”里面
-            # 我们通过 CSS 选择器精准定位这个 iframe
             iframe_selector = 'iframe[src*="cloudflare"], iframe[src*="turnstile"]'
-            
             if sb.is_element_present(iframe_selector):
                 print("      🎯 找到验证码框架，正在使用底层 CDP 协议发送精准点击...")
-                # 【核心优化 2】放弃不稳定的物理鼠标点击 (uc_gui_click_captcha)
-                # 改用 uc_click，它直接通过浏览器底层接口告诉网页“我点了这个中心点”
                 sb.uc_click(iframe_selector)
                 time.sleep(6)
             else:
                 print("      ⚠️ 未找到验证码框架特征，尝试使用备用物理鼠标点击...")
-                # 万一没找到 iframe，再用物理鼠标去屏幕上乱点试试运气 (兜底方案)
                 sb.uc_gui_click_captcha()
                 time.sleep(6)
             
-            # 检查是否成功绕过
             if not is_cloudflare_interstitial(sb):
                 print("      ✅ CF 5秒盾已通过！")
                 return True
@@ -119,7 +108,6 @@ def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
 def handle_turnstile_verification(sb) -> bool:
     """处理页面中嵌入的 Turnstile (人机验证) 模块"""
     try:
-        # 很多欧洲网站会有同意 Cookie 的弹窗，先关掉它，防止挡住验证码
         cookie_btn = 'button[data-cky-tag="accept-button"]'
         if sb.is_element_visible(cookie_btn):
             sb.click(cookie_btn)
@@ -127,7 +115,6 @@ def handle_turnstile_verification(sb) -> bool:
     except:
         pass
 
-    # 尝试把验证码模块滚动到屏幕中央，防止它在屏幕外面点不到
     sb.execute_script('''
         try {
             var t = document.querySelector('.cf-turnstile') || 
@@ -138,7 +125,6 @@ def handle_turnstile_verification(sb) -> bool:
     ''')
     time.sleep(2)
 
-    # 找找看页面里到底有没有验证码
     has_turnstile = False
     for _ in range(15):
         if (sb.is_element_present('iframe[src*="challenges.cloudflare"]') or 
@@ -155,8 +141,6 @@ def handle_turnstile_verification(sb) -> bool:
 
     print("    🧩 发现 Turnstile 验证码，准备执行拟人点击...")
     verified = False
-    
-    # 同样使用稳定的底层点击
     iframe_selector = 'iframe[src*="cloudflare"], iframe[src*="turnstile"]'
     
     for attempt in range(1, 4):
@@ -168,7 +152,6 @@ def handle_turnstile_verification(sb) -> bool:
         except:
             pass
             
-        # 循环检查验证码是否已经生成了验证成功的 Token (凭证)
         for _ in range(10):
             if sb.is_element_present('input[name="cf-turnstile-response"]'):
                 token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
@@ -181,7 +164,6 @@ def handle_turnstile_verification(sb) -> bool:
         if verified:
             break
 
-    # 兜底机制：即使没有点击成功，有些时候我们挂机等一会儿，CF 会认为我们是真的用户，自动放行
     if not verified:
         for _ in range(30):
             if sb.is_element_present('input[name="cf-turnstile-response"]'):
@@ -195,54 +177,46 @@ def handle_turnstile_verification(sb) -> bool:
     return verified
 
 # ==========================================
-# 3. 单个账号的处理流程 (核心反检测与执行逻辑)
+# 3. 单个账号的处理流程 
 # ==========================================
 def process_single_account(username, password):
     print(f"\n==========================================")
     print(f"➡️ 开始处理账号: {username}")
     print(f"==========================================")
     
-    # 获取系统里的代理信息 (跑 GitHub Actions 的时候，这会获取到本机的 Socks5 端口)
     env_proxy = os.environ.get("HTTP_PROXY")
     
-    # 【核心伪装参数】为了让 CF 觉得我们是一个正常的浏览器，需要带上这些参数
     with SB(
-        uc=True,            # 开启反检测模式 (必须)
-        test=True,          # 隐藏一些测试条
-        locale="en-US",     # 伪装成英文浏览器环境
-        headless=False,     # 保持 False！在 GitHub Actions 中会用 Xvfb 创建虚拟屏幕
-        proxy=env_proxy,    # 走我们设定的代理 IP
+        uc=True,            
+        test=True,          
+        locale="en-US",     
+        headless=False,     
+        proxy=env_proxy,    
         chromium_arg=[
-            "--disable-blink-features=AutomationControlled", # 去掉自动化标识
-            "--window-size=1920,1080",                       # 伪装正常显示器大小
-            "--disable-infobars",                            # 去掉各种提示条
-            "--disable-popup-blocking",                      # 允许弹窗
-            "--no-sandbox",                                  # Linux 运行必备
-            "--disable-dev-shm-usage",                       # 避免内存不足崩溃
+            "--disable-blink-features=AutomationControlled", 
+            "--window-size=1920,1080",                       
+            "--disable-infobars",                            
+            "--disable-popup-blocking",                      
+            "--no-sandbox",                                  
+            "--disable-dev-shm-usage",                       
             "--lang=en-US",                                  
         ]
     ) as sb:
         print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
-        # 使用带有重连功能的访问，防止因为代理网络波动导致打不开
         sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
-        
-        # 强制最大化窗口！保证虚拟屏幕和浏览器窗口 100% 重合
         sb.maximize_window()
         time.sleep(4)
         
         take_screenshot(sb, "01_初始访问页面", username)
 
-        # 检查代理 IP 是否被网站的防火墙彻底拉黑了
         page_source = sb.get_page_source()
         if "Error 1005" in page_source or "Access denied" in page_source:
             print("🚨 致命错误：当前代理节点的 IP 被彻底封锁 (Error 1005)！")
             take_screenshot(sb, "Error_1005_节点被封锁", username)
-            sys.exit(1) # IP 都被拉黑了，直接强制终止程序
+            sys.exit(1) 
 
-        # 【开始处理 Cloudflare 拦截】
         if is_cloudflare_interstitial(sb):
             if not bypass_cloudflare_interstitial(sb):
-                # 破盾失败，直接让程序报错并退出，方便你排查
                 print("    🚨 致命错误：无法绕过 Cloudflare 5秒盾，程序将立即终止运行！")
                 take_screenshot(sb, "Error_CF破盾失败彻底卡死", username)
                 sys.exit(1) 
@@ -258,10 +232,8 @@ def process_single_account(username, password):
             
             for login_attempt in range(2):
                 print(f"    ▶ 开始第 {login_attempt + 1} 次尝试登录...")
-                
                 captcha_success = False 
                 
-                # 开始识别图片验证码
                 for captcha_attempt in range(10): 
                     sb.wait_for_element(CONFIG['captcha_img_selector'], timeout=10)
                     img_src = sb.get_attribute(CONFIG['captcha_img_selector'], "src")
@@ -272,7 +244,6 @@ def process_single_account(username, password):
                         ocr = ddddocr.DdddOcr(show_ad=False)
                         captcha_text = ocr.classification(img_bytes)
                         
-                        # 这个网站的验证码通常是纯数字，如果是数字就认为识别成功
                         if captcha_text.isdigit():
                             print(f"      ✅ 验证码识别成功 (纯数字): {captcha_text}")
                             captcha_success = True 
@@ -290,7 +261,6 @@ def process_single_account(username, password):
                     take_screenshot(sb, "Error_验证码十次识别失败", username)
                     sys.exit(1) 
 
-                # 填写账号、密码、验证码
                 sb.clear(CONFIG['username_selector'])
                 sb.type(CONFIG['username_selector'], username)
                 
@@ -301,24 +271,22 @@ def process_single_account(username, password):
                 sb.type(CONFIG['captcha_input_selector'], captcha_text)
                 
                 take_screenshot(sb, "03_填写账号和验证码", username)
-                
                 sb.click(CONFIG['login_btn_selector'])
                 time.sleep(5)
                 
-                # 检查是否成功找到了代表“用户中心”的按钮
                 if sb.is_element_present(CONFIG['user_center_selector']):
                     login_success = True
                     print(f"    📄 登录验证成功！当前页面: {sb.get_title()}")
                     take_screenshot(sb, "04_登录成功_用户中心", username)
                     break 
                 else:
-                    print(f"    ⚠️ 第 {login_attempt + 1} 次登录似乎失败了（没找到用户中心），正在准备重试...")
+                    print(f"    ⚠️ 第 {login_attempt + 1} 次登录似乎失败了，正在准备重试...")
                     take_screenshot(sb, f"Error_第{login_attempt + 1}次登录失败", username)
                     sb.refresh() 
                     time.sleep(3)
             
             if not login_success:
-                print("    🚨 致命错误：两次登录尝试均未成功！可能是网站风控或账号密码错误。程序将立即终止运行！")
+                print("    🚨 致命错误：两次登录尝试均未成功！可能是网站风控或账号密码错误。")
                 take_screenshot(sb, "Error_最终登录失败", username)
                 sys.exit(1)
 
@@ -337,12 +305,10 @@ def process_single_account(username, password):
                 sb.click(CONFIG['sign_in_btn_selector'])
                 time.sleep(2) 
                 
-                # 提取系统给的算术题，比如 "请计算：5 + 3 ="，并计算出结果
                 question_text = sb.get_text(CONFIG['math_question_selector'])
                 math_expr = question_text.replace("请计算：", "").replace("=", "").strip()
                 result = eval(math_expr)
                 
-                # 如果算出来的是小数（说明遇到除法且除不尽），我们刷新一下换一道题
                 if isinstance(result, float) and not result.is_integer():
                     sb.refresh() 
                     time.sleep(3)
@@ -357,22 +323,54 @@ def process_single_account(username, password):
                 take_screenshot(sb, "06_填写签到算术答案", username)
                 sb.click(CONFIG['verify_btn_selector'])
                 
-                sb.wait_for_element(CONFIG['popup_content_selector'], timeout=5)
-                popup_msg = sb.get_text(CONFIG['popup_content_selector'])
-                print(f"    🔔 签到系统提示: 【{popup_msg}】")
+                # ===============================================================
+                # 🛠️ [核心修改] 处理连环弹窗的代码替换了你原来的这段区域
+                # ===============================================================
+                print("    >>> 正在等待“验证成功”弹窗出现...")
                 
-                take_screenshot(sb, "07_签到结果弹窗", username)
-                
-                sb.click(CONFIG['popup_confirm_btn_selector'])
-                time.sleep(2) 
+                try:
+                    # 1. 捕捉第一个弹窗："验证成功，您可以继续签到！"
+                    # 这里把等待时间调长到 10 秒，防止网络卡顿
+                    sb.wait_for_element_visible(CONFIG['popup_content_selector'], timeout=10)
+                    first_popup_msg = sb.get_text(CONFIG['popup_content_selector'])
+                    print(f"    🔔 第一层验证提示: 【{first_popup_msg}】")
+                    take_screenshot(sb, "07_第一层验证成功弹窗", username)
+                    
+                    # 2. 点击第一个弹窗里的【确定】关闭它
+                    sb.click(CONFIG['popup_confirm_btn_selector'])
+                    time.sleep(1.5) # 必须等待Layui的渐隐动画消失，不然点击穿透会失效
+                    
+                    # 判断如果验证确实成功了，我们就去点紫色的签到按钮
+                    if "验证成功" in first_popup_msg:
+                        print("    >>> 准备点击紫色的【我要签到】按钮...")
+                        
+                        # 使用 XPath 万能查找器：在全页面寻找文字包含"我要签到"的任何按钮或链接
+                        sb.click('//*[contains(text(), "我要签到")]')
+                        time.sleep(1)
+                        
+                        # 3. 捕捉第二个弹窗："今天你已经签到过了！" 或 "签到成功获得0.5积分"
+                        print("    >>> 正在等待最终的签到结果弹窗...")
+                        sb.wait_for_element_visible(CONFIG['popup_content_selector'], timeout=10)
+                        second_popup_msg = sb.get_text(CONFIG['popup_content_selector'])
+                        print(f"    🎉 最终签到状态: 【{second_popup_msg}】")
+                        take_screenshot(sb, "08_最终签到结果弹窗", username)
+                        
+                        # 收尾：点击第二个弹窗的确定，保持页面干净
+                        sb.click(CONFIG['popup_confirm_btn_selector'])
+                        time.sleep(1.5)
+                        
+                except Exception as e:
+                    print(f"    ⚠️ 处理弹窗时发生意外（可能是没弹出来）: {e}")
+                # ===============================================================
+                # 🛠️ [核心修改结束] 
+                # ===============================================================
                 
                 print("    🔄 正在强制刷新页面以同步最新的余额数据...")
                 sb.refresh()
                 time.sleep(4)
                 
-                take_screenshot(sb, "08_刷新获取最新积分", username)
+                take_screenshot(sb, "09_刷新获取最新积分", username)
                 
-                # 提取页面上的积分数字并转为小数，方便后面做比较
                 try:
                     balance_text = sb.get_text(CONFIG['points_balance_selector'])
                     print(f"    💰 当前账户原始信息: {balance_text}")
@@ -398,9 +396,8 @@ def process_single_account(username, password):
                 print("    ▶ 正在强制跳转至云服务器列表网址...")
                 sb.open(CONFIG['server_list_url'])
                 time.sleep(4) 
-                take_screenshot(sb, "09_云服务器列表页", username)
+                take_screenshot(sb, "10_云服务器列表页", username)
                 
-                # 只有页面上存在勾选框，才说明有服务器可以续费
                 if sb.is_element_present(CONFIG['server_checkbox_selector']):
                     sb.click(CONFIG['server_checkbox_selector'])
                     print("    ▶ 已勾选目标云服务器。")
@@ -410,14 +407,14 @@ def process_single_account(username, password):
                     
                     print("    ▶ 正在生成续费订单...")
                     sb.wait_for_element(CONFIG['confirm_renew_btn_selector'], timeout=10)
-                    take_screenshot(sb, "10_生成续费订单页", username)
+                    take_screenshot(sb, "11_生成续费订单页", username)
                     
                     sb.js_click(CONFIG['confirm_renew_btn_selector']) 
                     time.sleep(5) 
                     
                     print("    ▶ 已调起支付面板，等待确认...")
                     sb.wait_for_element(CONFIG['order_pay_btn_selector'], timeout=15)
-                    take_screenshot(sb, "11_调起支付收银台", username)
+                    take_screenshot(sb, "12_调起支付收银台", username)
                     
                     sb.js_click(CONFIG['order_pay_btn_selector']) 
                     
@@ -426,9 +423,8 @@ def process_single_account(username, password):
                     print("    ▶ 💸 已在弹窗中确认支付，正在等待系统处理并跳转...")
                     
                     time.sleep(8) 
-                    take_screenshot(sb, "12_支付完成详情页", username)
+                    take_screenshot(sb, "13_支付完成详情页", username)
                     
-                    # 尝试从页面上抓取新的到期时间并打印出来
                     try:
                         p_elements = sb.find_elements('section.text-gray p')
                         for p in p_elements:
@@ -442,7 +438,7 @@ def process_single_account(username, password):
                     sb.open(CONFIG['sign_in_url'])
                     time.sleep(4)
                     
-                    take_screenshot(sb, "13_最终核准积分页", username)
+                    take_screenshot(sb, "14_最终核准积分页", username)
                     
                     try:
                         final_balance_text = sb.get_text(CONFIG['points_balance_selector'])
@@ -459,7 +455,6 @@ def process_single_account(username, password):
                 print(f">>> 🛑 积分不足 (当前 {balance_value} < 2)，安全退出当前账号的后续操作！")
 
         except Exception as e:
-            # 如果中间任何一步代码报错，就会跳到这里记录错误并退出
             print(f"    ❌ 账号处理或执行过程中出现错误: {e}")
             take_screenshot(sb, "Error_程序崩溃截图", username)
             sys.exit(1)
@@ -469,14 +464,12 @@ def process_single_account(username, password):
 # ==========================================
 def main():
     print("🚀 自动化任务启动...")
-    # 获取 GitHub Secrets 里的账号密码字符串
     accounts_str = os.environ.get("acount")
     
     if not accounts_str:
         print("⚠️ 未获取到名为 'acount' 的环境变量！请检查 GitHub Secrets 配置。")
         return
 
-    # 把字符串按逗号拆分成列表（支持多账号批量处理）
     account_list = accounts_str.split(',')
     print(f"📋 共检测到 {len(account_list)} 个账号。")
     
@@ -486,13 +479,11 @@ def main():
             parts = item.split(':', 1) 
             username = parts[0].strip()
             password = parts[1].strip()
-            # 开始执行我们在上面定义好的主流程函数
             process_single_account(username, password)
         else:
             pass
             
     print("\n🏁 所有队列任务已全部执行完成！")
 
-# 这是 Python 脚本的标准入口：只要你是把这个文件当作主程序运行，就会自动执行 main() 函数
 if __name__ == "__main__":
     main()
