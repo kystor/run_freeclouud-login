@@ -375,7 +375,7 @@ def process_single_account(username, password):
                 take_screenshot(sb, "Error_签到数学题失败", username)
 
             # ==========================================
-            # 🌟 积分判断与云服务器续费模块 (优化版)
+            # 🌟 积分判断与云服务器续费模块 (最终优化版)
             # ==========================================
             if balance_value >= 2:
                 print(f">>> 💻 积分达标 (当前 {balance_value})，开始执行云服务器续费任务...")
@@ -399,7 +399,7 @@ def process_single_account(username, password):
                     sb.wait_for_element_visible(CONFIG['confirm_renew_btn_selector'], timeout=10)
                     take_screenshot(sb, "11_生成续费订单页", username)
                     
-                    # 尝试点击生成订单（原先你用了 js_click 导致没有跳页）
+                    # 尝试点击生成订单
                     print("    ▶ 尝试点击【立即续费】按钮...")
                     try:
                         sb.click(CONFIG['confirm_renew_btn_selector'])
@@ -410,24 +410,46 @@ def process_single_account(username, password):
                     
                     # 智能等待下一页的特征按钮出现，最多等20秒
                     try:
-                        sb.wait_for_element_visible(CONFIG['order_pay_btn_selector'], timeout=20)
+                        # 💡 优化 1：不仅要能看见，还要等待它变成“可点击”状态
+                        sb.wait_for_element_clickable(CONFIG['order_pay_btn_selector'], timeout=20)
                     except Exception as e:
                         print("    ⚠️ 严重：页面没有成功跳转到收银台！")
                         take_screenshot(sb, "Error_点击续费后未跳转", username)
                         raise e 
                         
+                    # 💡 优化 2：强制停顿 2 秒。给网页自身的 JavaScript 函数充足的加载时间
+                    time.sleep(2)
                     take_screenshot(sb, "12_调起支付收银台", username)
                     
-                    # 点击调出包含多种支付方式的弹窗
-                    print("    ▶ 点击【立即支付】，等待弹窗加载...")
-                    sb.click(CONFIG['order_pay_btn_selector']) 
+                    print("    ▶ 尝试点击右上角【立即支付】调出弹窗...")
+                    try:
+                        # 先尝试模拟真实物理鼠标点击
+                        sb.click(CONFIG['order_pay_btn_selector']) 
+                    except Exception:
+                        pass
                     
-                    # 等待弹窗里的最终“立即支付”按钮完全加载出来
-                    sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=10)
-                    time.sleep(1) # 等待弹窗的动画展开完毕，防止点击落空
-                    sb.click(CONFIG['modal_pay_btn_selector']) 
-                    print("    ▶ 💸 已在弹窗中确认支付，正在等待系统处理并跳转...")
+                    # 💡 优化 3：双保险机制。检查弹窗有没有乖乖出来
+                    try:
+                        # 等待 5 秒，看看弹窗里的最终支付按钮出没出现
+                        sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=5)
+                    except Exception:
+                        print("    ⚠️ 物理点击似乎失效，弹窗未弹出！正在使用底层 JS 强制触发...")
+                        # 如果没出来，说明刚才的点空了，直接用 JS 强制触发它的 onclick 事件
+                        sb.js_click(CONFIG['order_pay_btn_selector'])
+                        # 再次等待弹窗出现
+                        sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=10)
+                        
+                    time.sleep(1.5) # 等待弹窗从上往下掉的动画彻底结束，防止下一个点击点在空气上
                     
+                    print("    ▶ 💸 弹窗已出现，点击弹窗内的【确认支付】...")
+                    try:
+                        sb.click(CONFIG['modal_pay_btn_selector']) 
+                    except Exception:
+                        sb.js_click(CONFIG['modal_pay_btn_selector'])
+                        
+                    print("    ▶ 正在等待系统处理扣费并跳转...")
+                    
+                    # 留出 8 秒等待服务器处理并在后台完成扣费
                     time.sleep(8) 
                     take_screenshot(sb, "13_支付完成详情页", username)
                     
