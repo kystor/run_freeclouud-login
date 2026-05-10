@@ -323,47 +323,34 @@ def process_single_account(username, password):
                 take_screenshot(sb, "06_填写签到算术答案", username)
                 sb.click(CONFIG['verify_btn_selector'])
                 
-                # ===============================================================
-                # 🛠️ [核心修改] 处理连环弹窗的代码替换了你原来的这段区域
-                # ===============================================================
                 print("    >>> 正在等待“验证成功”弹窗出现...")
                 
                 try:
-                    # 1. 捕捉第一个弹窗："验证成功，您可以继续签到！"
-                    # 这里把等待时间调长到 10 秒，防止网络卡顿
                     sb.wait_for_element_visible(CONFIG['popup_content_selector'], timeout=10)
                     first_popup_msg = sb.get_text(CONFIG['popup_content_selector'])
                     print(f"    🔔 第一层验证提示: 【{first_popup_msg}】")
                     take_screenshot(sb, "07_第一层验证成功弹窗", username)
                     
-                    # 2. 点击第一个弹窗里的【确定】关闭它
                     sb.click(CONFIG['popup_confirm_btn_selector'])
-                    time.sleep(1.5) # 必须等待Layui的渐隐动画消失，不然点击穿透会失效
+                    time.sleep(1.5) 
                     
-                    # 判断如果验证确实成功了，我们就去点紫色的签到按钮
                     if "验证成功" in first_popup_msg:
                         print("    >>> 准备点击紫色的【我要签到】按钮...")
                         
-                        # 使用 XPath 万能查找器：在全页面寻找文字包含"我要签到"的任何按钮或链接
                         sb.click('//*[contains(text(), "我要签到")]')
                         time.sleep(1)
                         
-                        # 3. 捕捉第二个弹窗："今天你已经签到过了！" 或 "签到成功获得0.5积分"
                         print("    >>> 正在等待最终的签到结果弹窗...")
                         sb.wait_for_element_visible(CONFIG['popup_content_selector'], timeout=10)
                         second_popup_msg = sb.get_text(CONFIG['popup_content_selector'])
                         print(f"    🎉 最终签到状态: 【{second_popup_msg}】")
                         take_screenshot(sb, "08_最终签到结果弹窗", username)
                         
-                        # 收尾：点击第二个弹窗的确定，保持页面干净
                         sb.click(CONFIG['popup_confirm_btn_selector'])
                         time.sleep(1.5)
                         
                 except Exception as e:
                     print(f"    ⚠️ 处理弹窗时发生意外（可能是没弹出来）: {e}")
-                # ===============================================================
-                # 🛠️ [核心修改结束] 
-                # ===============================================================
                 
                 print("    🔄 正在强制刷新页面以同步最新的余额数据...")
                 sb.refresh()
@@ -388,7 +375,7 @@ def process_single_account(username, password):
                 take_screenshot(sb, "Error_签到数学题失败", username)
 
             # ==========================================
-            # 🌟 积分判断与云服务器续费模块
+            # 🌟 积分判断与云服务器续费模块 (优化版)
             # ==========================================
             if balance_value >= 2:
                 print(f">>> 💻 积分达标 (当前 {balance_value})，开始执行云服务器续费任务...")
@@ -399,27 +386,46 @@ def process_single_account(username, password):
                 take_screenshot(sb, "10_云服务器列表页", username)
                 
                 if sb.is_element_present(CONFIG['server_checkbox_selector']):
+                    # 勾选服务器
                     sb.click(CONFIG['server_checkbox_selector'])
                     print("    ▶ 已勾选目标云服务器。")
                     
-                    sb.js_click(CONFIG['list_renew_btn_selector'])
+                    # 点击底部的续费按钮，调出确认页面
+                    sb.click(CONFIG['list_renew_btn_selector'])
                     time.sleep(4) 
                     
                     print("    ▶ 正在生成续费订单...")
-                    sb.wait_for_element(CONFIG['confirm_renew_btn_selector'], timeout=10)
+                    # 确保订单页面的按钮完全可见
+                    sb.wait_for_element_visible(CONFIG['confirm_renew_btn_selector'], timeout=10)
                     take_screenshot(sb, "11_生成续费订单页", username)
                     
-                    sb.js_click(CONFIG['confirm_renew_btn_selector']) 
-                    time.sleep(5) 
+                    # 尝试点击生成订单（原先你用了 js_click 导致没有跳页）
+                    print("    ▶ 尝试点击【立即续费】按钮...")
+                    try:
+                        sb.click(CONFIG['confirm_renew_btn_selector'])
+                    except Exception:
+                        sb.uc_click(CONFIG['confirm_renew_btn_selector'])
                     
-                    print("    ▶ 已调起支付面板，等待确认...")
-                    sb.wait_for_element(CONFIG['order_pay_btn_selector'], timeout=15)
+                    print("    ▶ 点击已发送，正在等待系统生成收银台...")
+                    
+                    # 智能等待下一页的特征按钮出现，最多等20秒
+                    try:
+                        sb.wait_for_element_visible(CONFIG['order_pay_btn_selector'], timeout=20)
+                    except Exception as e:
+                        print("    ⚠️ 严重：页面没有成功跳转到收银台！")
+                        take_screenshot(sb, "Error_点击续费后未跳转", username)
+                        raise e 
+                        
                     take_screenshot(sb, "12_调起支付收银台", username)
                     
-                    sb.js_click(CONFIG['order_pay_btn_selector']) 
+                    # 点击调出包含多种支付方式的弹窗
+                    print("    ▶ 点击【立即支付】，等待弹窗加载...")
+                    sb.click(CONFIG['order_pay_btn_selector']) 
                     
-                    sb.wait_for_element(CONFIG['modal_pay_btn_selector'], timeout=10)
-                    sb.js_click(CONFIG['modal_pay_btn_selector']) 
+                    # 等待弹窗里的最终“立即支付”按钮完全加载出来
+                    sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=10)
+                    time.sleep(1) # 等待弹窗的动画展开完毕，防止点击落空
+                    sb.click(CONFIG['modal_pay_btn_selector']) 
                     print("    ▶ 💸 已在弹窗中确认支付，正在等待系统处理并跳转...")
                     
                     time.sleep(8) 
