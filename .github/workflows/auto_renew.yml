@@ -3,7 +3,7 @@ name: 多账号自动登录续期任务
 on:
   schedule:
     # 每天北京时间 00:00 运行 (UTC时间 16:00)
-    - cron: '0 16 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
