@@ -55,7 +55,7 @@ def take_screenshot(sb, step_name, username="system"):
 # 2. Cloudflare (CF) 绕过辅助函数 
 # ==========================================
 def is_cloudflare_interstitial(sb) -> bool:
-    """检测当前页面是否处于 CF 5秒盾拦截状态"""
+    """检测当前页面是否处于 CF 5秒盾拦截或人机验证状态"""
     try:
         page_source = sb.get_page_source()
         title = sb.get_title().lower() if sb.get_title() else ""
@@ -73,10 +73,10 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
-    """尝试绕过 CF 5秒盾"""
-    print("    🛡️ 检测到 CF 5秒盾，准备破除...")
+    """如果 UC 无感模式没有直接放行，执行底层补救穿透解盾"""
+    print("    🛡️ 检测到 CF 挑战页面仍未自动放行，准备执行备用穿透...")
     for attempt in range(max_attempts):
-        print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
+        print(f"      ▶ 尝试破盾 ({attempt+1}/{max_attempts})...")
         try:
             time.sleep(3)
             sb.set_window_rect(0, 0, 1920, 1080)
@@ -84,29 +84,33 @@ def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
 
             iframe_selector = 'iframe[src*="cloudflare"], iframe[src*="turnstile"]'
             if sb.is_element_present(iframe_selector):
-                print("      🎯 找到验证码框架，正在使用底层 CDP 协议发送精准点击...")
+                print("      🎯 找到精确的验证码框架，正在利用 CDP 驱动发送底层点击...")
                 sb.uc_click(iframe_selector)
-                time.sleep(6)
+                time.sleep(8)
             else:
-                print("      ⚠️ 未找到验证码框架特征，尝试使用备用物理鼠标点击...")
-                sb.uc_gui_click_captcha()
-                time.sleep(6)
+                print("      ⚠️ 未捕获特定框架，尝试使用页面底层盲穿机制...")
+                # 在虚拟屏幕中，传统的虚拟物理鼠标盲点极易失效，改用原生 uc_click 点击 body
+                try:
+                    sb.uc_click("body")
+                except:
+                    pass
+                time.sleep(8)
             
             if not is_cloudflare_interstitial(sb):
-                print("      ✅ CF 5秒盾已通过！")
+                print("      ✅ CF 5秒盾挑战已成功通过！")
                 return True
         except Exception as e:
-            print(f"      ⚠️ 点击过程遇到小问题: {e}")
+            print(f"      ⚠️ 点击过程中断: {e}")
             pass
             
-        print("      🔄 似乎没点中，或者网页卡住了，刷新页面重置状态...")
+        print("      🔄 穿透未生效，强制刷新页面以重置 Cloudflare 安全状态...")
         sb.refresh()
         time.sleep(5)
         
     return False
 
 def handle_turnstile_verification(sb) -> bool:
-    """处理页面中嵌入的 Turnstile (人机验证) 模块"""
+    """处理页面中嵌入的 Turnstile 隐藏验证模块"""
     try:
         cookie_btn = 'button[data-cky-tag="accept-button"]'
         if sb.is_element_visible(cookie_btn):
@@ -136,10 +140,10 @@ def handle_turnstile_verification(sb) -> bool:
         time.sleep(1)
 
     if not has_turnstile:
-        print("    🟢 无感验证通过 (当前页面未发现 Turnstile 验证码)")
+        print("    🟢 无感验证直接通过 (页面中没有阻断性 Turnstile 模块)")
         return True
 
-    print("    🧩 发现 Turnstile 验证码，准备执行拟人点击...")
+    print("    🧩 页面内嵌入了人机验证码，尝试底层穿透...")
     verified = False
     iframe_selector = 'iframe[src*="cloudflare"], iframe[src*="turnstile"]'
     
@@ -148,7 +152,7 @@ def handle_turnstile_verification(sb) -> bool:
             if sb.is_element_present(iframe_selector):
                 sb.uc_click(iframe_selector)
             else:
-                sb.uc_gui_click_captcha()
+                sb.uc_click("body")
         except:
             pass
             
@@ -156,7 +160,7 @@ def handle_turnstile_verification(sb) -> bool:
             if sb.is_element_present('input[name="cf-turnstile-response"]'):
                 token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
                 if token and len(token) > 20:
-                    print("      ✅ 验证码点击成功，已获取系统 Token！")
+                    print("      ✅ 验证码点击成功，已成功获取系统 Token！")
                     verified = True
                     break
             time.sleep(1)
@@ -169,7 +173,7 @@ def handle_turnstile_verification(sb) -> bool:
             if sb.is_element_present('input[name="cf-turnstile-response"]'):
                 token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
                 if token and len(token) > 20:
-                    print("      ✅ 验证码自动放行，已获取系统 Token！")
+                    print("      ✅ 验证码自动放行，已捕获系统 Token！")
                     verified = True
                     break
             time.sleep(1)
@@ -186,26 +190,26 @@ def process_single_account(username, password):
     
     env_proxy = os.environ.get("HTTP_PROXY")
     
+    # 净化升级后的 SeleniumBase UC 启动核心模块
     with SB(
-        uc=True,            
+        uc=True,            # 开启 Undetected 浏览器指纹抗反爬探测
         test=True,          
         locale="en-US",     
-        headless=False,     
+        headless=False,     # 在 Xvfb 虚拟屏幕中必须保持 False，否则 CF 通过率为 0
         proxy=env_proxy,    
+        # 💡 核心改动：移除了所有与 UC 框架冲突、会导致 Action 环境暴露的硬编码标志
         chromium_arg=[
-            "--disable-blink-features=AutomationControlled", 
             "--window-size=1920,1080",                       
-            "--disable-infobars",                            
-            "--disable-popup-blocking",                      
-            "--no-sandbox",                                  
-            "--disable-dev-shm-usage",                       
             "--lang=en-US",                                  
+            "--disable-popup-blocking",                      
+            "--force-device-scale-factor=1" # 锁死缩放比例，防止 Xvfb 像素错位
         ]
     ) as sb:
-        print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
-        sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
+        print(f"🌐 正在发起网络握手，尝试访问目标网站: {CONFIG['target_url']}")
+        # 💡 优化点：把 reconnect_time 延长至 15 秒，给云端虚拟网络留出更多的初始化缓冲时间
+        sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=15)
         sb.maximize_window()
-        time.sleep(4)
+        time.sleep(6) # 留出时间让浏览器渲染完整的安全证书
         
         take_screenshot(sb, "01_初始访问页面", username)
 
@@ -215,6 +219,7 @@ def process_single_account(username, password):
             take_screenshot(sb, "Error_1005_节点被封锁", username)
             sys.exit(1) 
 
+        # 如果原生无感未通过，执行降级点击穿透
         if is_cloudflare_interstitial(sb):
             if not bypass_cloudflare_interstitial(sb):
                 print("    🚨 致命错误：无法绕过 Cloudflare 5秒盾，程序将立即终止运行！")
@@ -410,36 +415,29 @@ def process_single_account(username, password):
                     
                     # 智能等待下一页的特征按钮出现，最多等20秒
                     try:
-                        # 💡 优化 1：不仅要能看见，还要等待它变成“可点击”状态
                         sb.wait_for_element_clickable(CONFIG['order_pay_btn_selector'], timeout=20)
                     except Exception as e:
                         print("    ⚠️ 严重：页面没有成功跳转到收银台！")
                         take_screenshot(sb, "Error_点击续费后未跳转", username)
                         raise e 
                         
-                    # 💡 优化 2：强制停顿 2 秒。给网页自身的 JavaScript 函数充足的加载时间
                     time.sleep(2)
                     take_screenshot(sb, "12_调起支付收银台", username)
                     
                     print("    ▶ 尝试点击右上角【立即支付】调出弹窗...")
                     try:
-                        # 先尝试模拟真实物理鼠标点击
                         sb.click(CONFIG['order_pay_btn_selector']) 
                     except Exception:
                         pass
                     
-                    # 💡 优化 3：双保险机制。检查弹窗有没有乖乖出来
                     try:
-                        # 等待 5 秒，看看弹窗里的最终支付按钮出没出现
                         sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=5)
                     except Exception:
                         print("    ⚠️ 物理点击似乎失效，弹窗未弹出！正在使用底层 JS 强制触发...")
-                        # 如果没出来，说明刚才的点空了，直接用 JS 强制触发它的 onclick 事件
                         sb.js_click(CONFIG['order_pay_btn_selector'])
-                        # 再次等待弹窗出现
                         sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=10)
                         
-                    time.sleep(1.5) # 等待弹窗从上往下掉的动画彻底结束，防止下一个点击点在空气上
+                    time.sleep(1.5) 
                     
                     print("    ▶ 💸 弹窗已出现，点击弹窗内的【确认支付】...")
                     try:
@@ -449,7 +447,6 @@ def process_single_account(username, password):
                         
                     print("    ▶ 正在等待系统处理扣费并跳转...")
                     
-                    # 留出 8 秒等待服务器处理并在后台完成扣费
                     time.sleep(8) 
                     take_screenshot(sb, "13_支付完成详情页", username)
                     
