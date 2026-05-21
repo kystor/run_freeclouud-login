@@ -3,13 +3,12 @@ name: 多账号自动登录续期任务
 on:
   schedule:
     # 每天北京时间 00:00 运行 (UTC时间 16:00)
-    - cron: '0 16 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
   run-script:
-    # 💡 核心修改 1：不使用最新的 ubuntu-latest，直接指定死固定且最稳定的 22.04 版本
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
@@ -21,15 +20,14 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 📦 安装系统底层图形依赖、中文字体与显卡欺骗驱动
-        # 💡 核心修改 2：在 22.04 环境下，我们无缝请回了原本报错的 libgl1-mesa-glx
-        # 并且将 24.04 专用的 libasound2t64 还原为了 22.04 的标准音频基础包 libasound2
+      - name: 📦 安装系统底层图形依赖与中文字体
+        # 【修改说明】针对 Ubuntu 24.04，将原本的 libasound2 更新为 libasound2t64
         run: |
           (
             set -e
             sudo apt-get update
-            # 一键安装 xvfb 虚拟屏幕、中文字体、核心 3D 伪装渲染驱动以及音视频底层环境
-            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2 mesa-utils libgl1-mesa-glx
+            # 这里是修复的核心，注意结尾的 libasound2t64
+            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2t64
           ) > apt_install.log 2>&1 || {
             echo "❌ 系统基础依赖安装失败，详细日志如下："
             cat apt_install.log
@@ -40,7 +38,6 @@ jobs:
         run: |
           (
             set -e
-            pip install --upgrade pip
             pip install seleniumbase ddddocr PyAutoGUI
           ) > pip_install.log 2>&1 || {
             echo "❌ 依赖安装失败，详细日志如下："
@@ -140,7 +137,7 @@ jobs:
                 sys.exit(1)
         run: |
           if [ -z "$PROXY" ]; then
-              echo "❌ 错误：环境变量 PROXY 为空！请在 GitHub Secrets 中配置代理节点。"
+              echo "❌ 错误：环境变量 PROXY 为空！"
               exit 1
           fi
 
@@ -190,9 +187,10 @@ jobs:
           
           sleep 5
 
-      - name: 🏃 运行自动化脚本 (虚拟 3D 渲染加速伪装版)
+      - name: 🏃 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
           acount: ${{ secrets.ACOUNT }}
+          # 让 Python 脚本的所有网络请求都走这个本地建立的 Socks5 代理
           HTTP_PROXY: socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
@@ -201,15 +199,15 @@ jobs:
             set -e
             curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
           ) > curl_test.log 2>&1 || { 
-            echo "❌ 本地核心代理连接失败！为您提取底层网络日志："; 
+            echo "❌ 代理连接失败！为您提取底层日志："; 
             echo "================ 代理核心运行日志 ================";
             cat proxy.log;
             echo "====================================================";
             exit 1; 
           }
           
-          # 【运行指令】启用带硬解渲染链欺骗扩展（GLX + RENDER）的虚拟桌面，并加入不加缓冲的实时日志指令 '-u' 执行脚本
-          xvfb-run --server-args="-screen 0 1920x1080x24 +extension GLX +render" python -u auto_login.py
+          # 【运行核心】使用 xvfb-run 启动虚拟屏幕，并携带 -u 参数确保日志实时输出
+          xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 📤 上传运行过程截图与日志文件
         uses: actions/upload-artifact@v4
