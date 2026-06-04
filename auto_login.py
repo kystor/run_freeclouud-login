@@ -17,7 +17,6 @@ CONFIG = {
     "captcha_input_selector": "#captcha_allow_login_email_captcha", 
     "login_btn_selector": 'button[type="submit"]',
     
-    # 核心判断：如果能找到这个用户中心的按钮，说明登录成功了
     "user_center_selector": 'a[href="clientarea"]',
     
     "sign_in_url": 'https://run.freecloud.ltd/addons?_plugin=5&_controller=index&_action=index',
@@ -37,12 +36,9 @@ CONFIG = {
     "modal_pay_btn_selector": 'button.pay-now'                
 }
 
-# 创建一个专门存放截图的文件夹，如果已经存在就不会报错
 os.makedirs("screenshots", exist_ok=True)
 
-# 定义一个截图辅助函数，方便我们随时知道程序卡在哪里了
 def take_screenshot(sb, step_name, username="system"):
-    # 把邮箱里的 @ 和 . 替换成下划线，防止文件名报错
     safe_name = username.replace("@", "_").replace(".", "_")
     filepath = f"screenshots/{safe_name}_{step_name}.png"
     try:
@@ -55,7 +51,6 @@ def take_screenshot(sb, step_name, username="system"):
 # 2. Cloudflare (CF) 绕过辅助函数 
 # ==========================================
 def is_cloudflare_interstitial(sb) -> bool:
-    """检测当前页面是否处于 CF 5秒盾拦截状态"""
     try:
         page_source = sb.get_page_source()
         title = sb.get_title().lower() if sb.get_title() else ""
@@ -73,7 +68,6 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
-    """尝试绕过 CF 5秒盾"""
     print("    🛡️ 检测到 CF 5秒盾，准备破除...")
     for attempt in range(max_attempts):
         print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
@@ -106,7 +100,6 @@ def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
     return False
 
 def handle_turnstile_verification(sb) -> bool:
-    """处理页面中嵌入的 Turnstile (人机验证) 模块"""
     try:
         cookie_btn = 'button[data-cky-tag="accept-button"]'
         if sb.is_element_visible(cookie_btn):
@@ -186,24 +179,23 @@ def process_single_account(username, password):
     
     env_proxy = os.environ.get("HTTP_PROXY")
     
-    # 【核心修复 1】：准备一个极度真实的 Windows 10 系统 Google Chrome 浏览器指纹
-    # 用来替换掉 GitHub 服务器默认的 Linux 机器人指纹，降低 CF 盾的警戒心
-    windows_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    
+    # 【核心修复】：
+    # 1. 移除了自定义的 agent，让 SeleniumBase 自动匹配最真实的当前版本指纹，防止引擎冲突。
+    # 2. 移除了 --disable-gpu，让系统自然调用软件渲染，避免被 CF 识别为无头浏览器。
+    # 3. 加入 window_size 参数，强制给出一个真实显示器的分辨率特征。
     with SB(
         uc=True,            
-        agent=windows_agent, # 👉 注入我们刚才定义的 Windows 伪装指纹
         locale="en-US",     
         headless=False,     
-        proxy=env_proxy,    
+        proxy=env_proxy,
+        window_size="1920,1080", 
         chromium_arg=[
             "--no-sandbox",                                  
             "--disable-dev-shm-usage",
             "--disable-popup-blocking",
+            # 仅保留极其关键的 WebRTC 防泄漏参数，避免真实 IP 穿透代理
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-            "--force-webrtc-ip-handling-policy",
-            # 👉 增加禁用 GPU 参数：在没有独立显卡的虚拟机里，开启 GPU 加速往往会导致渲染错误和被 CF 察觉
-            "--disable-gpu"
+            "--force-webrtc-ip-handling-policy"
         ]
     ) as sb:
         print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
@@ -379,7 +371,7 @@ def process_single_account(username, password):
                 take_screenshot(sb, "Error_签到数学题失败", username)
 
             # ==========================================
-            # 🌟 积分判断与云服务器续费模块 (最终优化版)
+            # 🌟 积分判断与云服务器续费模块
             # ==========================================
             if balance_value >= 2:
                 print(f">>> 💻 积分达标 (当前 {balance_value})，开始执行云服务器续费任务...")
@@ -390,20 +382,16 @@ def process_single_account(username, password):
                 take_screenshot(sb, "10_云服务器列表页", username)
                 
                 if sb.is_element_present(CONFIG['server_checkbox_selector']):
-                    # 勾选服务器
                     sb.click(CONFIG['server_checkbox_selector'])
                     print("    ▶ 已勾选目标云服务器。")
                     
-                    # 点击底部的续费按钮，调出确认页面
                     sb.click(CONFIG['list_renew_btn_selector'])
                     time.sleep(4) 
                     
                     print("    ▶ 正在生成续费订单...")
-                    # 确保订单页面的按钮完全可见
                     sb.wait_for_element_visible(CONFIG['confirm_renew_btn_selector'], timeout=10)
                     take_screenshot(sb, "11_生成续费订单页", username)
                     
-                    # 尝试点击生成订单
                     print("    ▶ 尝试点击【立即续费】按钮...")
                     try:
                         sb.click(CONFIG['confirm_renew_btn_selector'])
@@ -412,27 +400,22 @@ def process_single_account(username, password):
                     
                     print("    ▶ 点击已发送，正在等待系统生成收银台...")
                     
-                    # 智能等待下一页的特征按钮出现，最多等20秒
                     try:
-                        # 等待其变成“可点击”状态
                         sb.wait_for_element_clickable(CONFIG['order_pay_btn_selector'], timeout=20)
                     except Exception as e:
                         print("    ⚠️ 严重：页面没有成功跳转到收银台！")
                         take_screenshot(sb, "Error_点击续费后未跳转", username)
                         raise e 
                         
-                    # 强制停顿 2 秒，给网页自身的 JavaScript 函数充足的加载时间
                     time.sleep(2)
                     take_screenshot(sb, "12_调起支付收银台", username)
                     
                     print("    ▶ 尝试点击右上角【立即支付】调出弹窗...")
                     try:
-                        # 先尝试模拟真实物理鼠标点击
                         sb.click(CONFIG['order_pay_btn_selector']) 
                     except Exception:
                         pass
                     
-                    # 双保险机制：检查弹窗有没有乖乖出来
                     try:
                         sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=5)
                     except Exception:
@@ -450,7 +433,6 @@ def process_single_account(username, password):
                         
                     print("    ▶ 正在等待系统处理扣费并跳转...")
                     
-                    # 留出 8 秒等待服务器处理并在后台完成扣费
                     time.sleep(8) 
                     take_screenshot(sb, "13_支付完成详情页", username)
                     
