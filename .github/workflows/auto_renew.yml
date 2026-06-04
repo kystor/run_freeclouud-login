@@ -4,6 +4,7 @@ on:
   schedule:
     # 每天北京时间 00:00 运行 (UTC时间 16:00)
     - cron: '0 15 * * *'
+  # 允许我们手动在网页上点击按钮来运行这个脚本
   workflow_dispatch:
 
 jobs:
@@ -21,12 +22,12 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 安装系统底层图形依赖与中文字体
-        # 【修改说明】针对 Ubuntu 24.04，将原本的 libasound2 更新为 libasound2t64
+        # 【说明】安装浏览器运行所需要的虚拟屏幕和字体依赖
         run: |
           (
             set -e
             sudo apt-get update
-            # 这里是修复的核心，注意结尾的 libasound2t64
+            # 针对 Ubuntu 24.04 修复的依赖项 libasound2t64
             sudo apt-get install -y xvfb fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2t64
           ) > apt_install.log 2>&1 || {
             echo "❌ 系统基础依赖安装失败，详细日志如下："
@@ -47,35 +48,44 @@ jobs:
 
       - name: 🚀 智能解析全协议节点并启动代理内核
         env:
+          # 从 GitHub Secrets 中读取我们配置好的代理链接
           PROXY: ${{ secrets.PROXY }}
           PY_SCRIPT: |
+            # 导入我们需要用到的 Python 系统工具包
             import os, sys, json, base64
             from urllib.parse import urlparse, parse_qs
 
+            # 1. 尝试获取代理链接，去掉首尾多余的空白字符
             link = os.environ.get('PROXY', '').strip()
             if not link:
                 print("❌ 错误：环境变量 PROXY 为空！")
                 sys.exit(1)
 
+            # 2. 准备 Xray (代理软件的底层核心) 的基础配置模板
             config = {
                 "log": {"loglevel": "warning"},
                 "inbounds": [{
-                    "port": 10808,
-                    "listen": "127.0.0.1",
-                    "protocol": "socks",
+                    "port": 10808,          # 规定本地连接端口为 10808
+                    "listen": "127.0.0.1",  # 仅限本地访问，防止被外界扫描
+                    "protocol": "socks",    # 接收格式为 socks
                     "settings": {"udp": True}
                 }],
-                "outbounds": []
+                "outbounds": []             # 出站规则，马上把解析好的服务器信息填到这里
             }
 
             outbound = {"protocol": "", "settings": {}, "streamSettings": {}}
 
+            # 工具函数：专门用来把经过 Base64 加密的密文还原成能看懂的明文
             def decode_b64(s):
                 s = s.replace('-', '+').replace('_', '/')
+                # 自动把缺失的 '=' 补齐，防止解密报错
                 s += "=" * ((4 - len(s) % 4) % 4)
                 return base64.b64decode(s).decode('utf-8')
 
             try:
+                # ================= 开始针对不同的代理协议进行识别 =================
+                
+                # 情况A：如果是 Vmess 协议
                 if link.startswith("vmess://"):
                     outbound["protocol"] = "vmess"
                     v_json = json.loads(decode_b64(link[8:]))
@@ -88,6 +98,7 @@ jobs:
                         outbound["streamSettings"]["security"] = "tls"
                         outbound["streamSettings"]["tlsSettings"] = {"serverName": v_json.get("sni", "") or v_json.get("add", "")}
                         
+                # 情况B：如果是 Vless 或 Trojan 协议
                 elif link.startswith("vless://") or link.startswith("trojan://"):
                     parsed = urlparse(link)
                     proto = parsed.scheme
@@ -114,23 +125,51 @@ jobs:
                         if security == "reality":
                             outbound["streamSettings"]["realitySettings"] = {"publicKey": qs.get("pbk", [""])[0], "shortId": qs.get("sid", [""])[0], "fingerprint": qs.get("fp", ["chrome"])[0]}
 
-                elif link.startswith("socks5://"):
+                # 情况C：如果是 SOCKS 协议 (核心修复区域：兼容了 Og 这种空密码的加密情况)
+                elif link.startswith("socks5://") or link.startswith("socks://"):
                     outbound["protocol"] = "socks"
-                    parsed = urlparse(link)
+                    parsed = urlparse(link) 
+                    
+                    # 抓取 IP 地址和端口，如果没有写端口，默认使用 1080
                     server = {"address": parsed.hostname, "port": parsed.port or 1080}
+                    
                     if parsed.username:
-                        server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
+                        user_info = parsed.username
+                        if parsed.password:
+                            user_info += ":" + parsed.password 
+                        
+                        # 检查这段字符里有没有冒号 ":"
+                        # 如果没有冒号，说明极有可能是被 Base64 加密过了（比如只剩下了 Og）
+                        if ":" not in user_info:
+                            try:
+                                # 尝试把密文还原
+                                decoded_info = decode_b64(user_info)
+                                
+                                # 如果还原后发现了冒号，说明解密成功，把它分成账号和密码两部分
+                                if ":" in decoded_info:
+                                    u, p = decoded_info.split(":", 1)
+                                    # 只有当账号或密码确实有内容时，才写进配置文件
+                                    if u or p: 
+                                        server["users"] = [{"user": u, "pass": p}]
+                            except Exception:
+                                # 如果解密失败，说明它本来就没加密，直接把它当成正常的账号填进去
+                                server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
+                        else:
+                            # 带有冒号的明文账号密码，直接填入
+                            server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
+
                     outbound["settings"] = {"servers": [server]}
 
                 else:
                     print(f"❌ 暂不支持自动解析此协议: {link[:10]}...")
                     sys.exit(1)
 
+                # 3. 将组装好的出口配置合并，保存为 config.json 文件，供下方的 xray 程序读取
                 config["outbounds"].append(outbound)
                 with open("config.json", "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=2)
                     
-                print(f"✅ 成功将 {link[:8]}... 链接转换为 config.json 配置文件！")
+                print(f"✅ 成功将代理链接解析为 config.json 配置文件！")
                 
             except Exception as e:
                 print(f"❌ 解析链接时发生致命错误: {e}")
@@ -142,6 +181,7 @@ jobs:
           fi
 
           if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
+              # 配置 Hysteria2 代理
               (
                 set -e
                 wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
@@ -168,6 +208,7 @@ jobs:
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
               
           else
+              # 下载并配置 Xray 代理内核
               (
                 set -e
                 wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
@@ -179,9 +220,12 @@ jobs:
                 exit 1
               }
               
+              # 运行上面我们写的 Python 脚本，生成配置文件
+              # 使用了 -u 参数，确保输出日志不会被缓存卡住，能够实时显示
               printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
               python -u parse_proxy.py
               
+              # 后台启动代理软件
               nohup ./xray run -c config.json > proxy.log 2>&1 &
           fi
           
@@ -190,13 +234,14 @@ jobs:
       - name: 🏃 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
           acount: ${{ secrets.ACOUNT }}
-          # 让 Python 脚本的所有网络请求都走这个本地建立的 Socks5 代理
+          # 强制接管网络请求，让 Python 脚本走我们刚刚建好的本地代理
           HTTP_PROXY: socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
           (
             set -e
+            # 先用 curl 测试一下代理网络通不通，访问百度试试
             curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
           ) > curl_test.log 2>&1 || { 
             echo "❌ 代理连接失败！为您提取底层日志："; 
@@ -206,7 +251,8 @@ jobs:
             exit 1; 
           }
           
-          # 【运行核心】使用 xvfb-run 启动虚拟屏幕，并携带 -u 参数确保日志实时输出
+          # 【运行核心】使用 xvfb-run 启动一块虚拟的显示器屏幕
+          # 并且按照要求，使用 python -u 参数执行主程序，确保日志实时顺畅输出
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 📤 上传运行过程截图与日志文件
@@ -217,4 +263,5 @@ jobs:
           path: |
             screenshots/
             *.log
+          # 截图和日志在 GitHub 上保留 7 天
           retention-days: 7
