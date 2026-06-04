@@ -186,20 +186,21 @@ def process_single_account(username, password):
     
     env_proxy = os.environ.get("HTTP_PROXY")
     
+    # 【修复核心区域】：移除了画蛇添足的旧参数，增加了防 WebRTC 真实 IP 泄漏的指令
     with SB(
-        uc=True,            
+        uc=True,            # 开启终极反检测模式 (防 CF 盾的核心)
         test=True,          
         locale="en-US",     
-        headless=False,     
+        headless=False,     # 因为我们配置了虚拟屏幕，这里必须是 False
         proxy=env_proxy,    
         chromium_arg=[
-            "--disable-blink-features=AutomationControlled", 
-            "--window-size=1920,1080",                       
-            "--disable-infobars",                            
-            "--disable-popup-blocking",                      
+            # 基础的 Linux 服务器运行必备参数，保证浏览器不崩溃
             "--no-sandbox",                                  
-            "--disable-dev-shm-usage",                       
-            "--lang=en-US",                                  
+            "--disable-dev-shm-usage",
+            "--disable-popup-blocking",
+            # 【重要】封堵 WebRTC 漏洞，强制浏览器所有的 UDP 流量都走代理，防止真实 IP 穿透泄漏被 CF 拦截
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--force-webrtc-ip-handling-policy"
         ]
     ) as sb:
         print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
@@ -410,14 +411,14 @@ def process_single_account(username, password):
                     
                     # 智能等待下一页的特征按钮出现，最多等20秒
                     try:
-                        # 💡 优化 1：不仅要能看见，还要等待它变成“可点击”状态
+                        # 等待其变成“可点击”状态
                         sb.wait_for_element_clickable(CONFIG['order_pay_btn_selector'], timeout=20)
                     except Exception as e:
                         print("    ⚠️ 严重：页面没有成功跳转到收银台！")
                         take_screenshot(sb, "Error_点击续费后未跳转", username)
                         raise e 
                         
-                    # 💡 优化 2：强制停顿 2 秒。给网页自身的 JavaScript 函数充足的加载时间
+                    # 强制停顿 2 秒，给网页自身的 JavaScript 函数充足的加载时间
                     time.sleep(2)
                     take_screenshot(sb, "12_调起支付收银台", username)
                     
@@ -428,18 +429,15 @@ def process_single_account(username, password):
                     except Exception:
                         pass
                     
-                    # 💡 优化 3：双保险机制。检查弹窗有没有乖乖出来
+                    # 双保险机制：检查弹窗有没有乖乖出来
                     try:
-                        # 等待 5 秒，看看弹窗里的最终支付按钮出没出现
                         sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=5)
                     except Exception:
                         print("    ⚠️ 物理点击似乎失效，弹窗未弹出！正在使用底层 JS 强制触发...")
-                        # 如果没出来，说明刚才的点空了，直接用 JS 强制触发它的 onclick 事件
                         sb.js_click(CONFIG['order_pay_btn_selector'])
-                        # 再次等待弹窗出现
                         sb.wait_for_element_visible(CONFIG['modal_pay_btn_selector'], timeout=10)
                         
-                    time.sleep(1.5) # 等待弹窗从上往下掉的动画彻底结束，防止下一个点击点在空气上
+                    time.sleep(1.5) 
                     
                     print("    ▶ 💸 弹窗已出现，点击弹窗内的【确认支付】...")
                     try:
