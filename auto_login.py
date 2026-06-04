@@ -186,21 +186,24 @@ def process_single_account(username, password):
     
     env_proxy = os.environ.get("HTTP_PROXY")
     
-    # 【修复核心区域】：移除了画蛇添足的旧参数，增加了防 WebRTC 真实 IP 泄漏的指令
+    # 【核心修复 1】：准备一个极度真实的 Windows 10 系统 Google Chrome 浏览器指纹
+    # 用来替换掉 GitHub 服务器默认的 Linux 机器人指纹，降低 CF 盾的警戒心
+    windows_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    
     with SB(
-        uc=True,            # 开启终极反检测模式 (防 CF 盾的核心)
-        test=True,          
+        uc=True,            
+        agent=windows_agent, # 👉 注入我们刚才定义的 Windows 伪装指纹
         locale="en-US",     
-        headless=False,     # 因为我们配置了虚拟屏幕，这里必须是 False
+        headless=False,     
         proxy=env_proxy,    
         chromium_arg=[
-            # 基础的 Linux 服务器运行必备参数，保证浏览器不崩溃
             "--no-sandbox",                                  
             "--disable-dev-shm-usage",
             "--disable-popup-blocking",
-            # 【重要】封堵 WebRTC 漏洞，强制浏览器所有的 UDP 流量都走代理，防止真实 IP 穿透泄漏被 CF 拦截
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-            "--force-webrtc-ip-handling-policy"
+            "--force-webrtc-ip-handling-policy",
+            # 👉 增加禁用 GPU 参数：在没有独立显卡的虚拟机里，开启 GPU 加速往往会导致渲染错误和被 CF 察觉
+            "--disable-gpu"
         ]
     ) as sb:
         print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
