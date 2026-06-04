@@ -26,8 +26,9 @@ jobs:
           (
             set -e
             sudo apt-get update
-            # 针对 Ubuntu 24.04 修复的依赖项 libasound2t64
-            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2t64
+            # 【核心修复 2】：这里新增了 fluxbox，它是一个极简的桌面环境管理器。
+            # 只有装了它，代码里的“模拟真人鼠标移动和点击验证码”的指令才能找到真实的坐标并生效。
+            sudo apt-get install -y xvfb fluxbox fonts-noto-cjk python3-tk python3-dev scrot libx11-dev libasound2t64
           ) > apt_install.log 2>&1 || {
             echo "❌ 系统基础依赖安装失败，详细日志如下："
             cat apt_install.log
@@ -38,7 +39,6 @@ jobs:
         run: |
           (
             set -e
-            # 【重要更新】：加入了 -U 参数，确保每次运行都拉取最新版的 seleniumbase 来对抗 CF 盾
             pip install -U seleniumbase ddddocr PyAutoGUI
           ) > pip_install.log 2>&1 || {
             echo "❌ 依赖安装失败，详细日志如下："
@@ -197,7 +197,6 @@ jobs:
                 exit 1
               }
               
-              # 确保 Python 脚本实时输出 (-u)
               printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
               python -u parse_proxy.py
               
@@ -224,8 +223,10 @@ jobs:
             exit 1; 
           }
           
-          # 【运行核心】添加 -u 确保日志不被缓存，实时显示
-          xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
+          # 【运行核心修改】：不再是直接执行 python。
+          # 而是通过 bash -c 命令，先启动 fluxbox 桌面环境并在后台运行 (&)，
+          # 紧接着等待 2 秒让桌面初始化完成，最后再用 -u 参数运行主脚本。
+          xvfb-run --server-args="-screen 0 1920x1080x24" bash -c "fluxbox & sleep 2 && python -u auto_login.py"
 
       - name: 📤 上传运行过程截图与日志文件
         uses: actions/upload-artifact@v4
