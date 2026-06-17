@@ -20,202 +20,57 @@ jobs:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
-        # 将输出写入日志，只有失败时才打印到控制台
+        # 直接安装依赖，日志将直观显示在 GitHub Actions 控制台中
         run: |
-          (
-            set -e
-            pip install seleniumbase ddddocr PyAutoGUI
-          ) > pip_install.log 2>&1 || {
-            echo "❌ 依赖安装失败，详细日志如下："
-            cat pip_install.log
-            exit 1
-          }
+          pip install seleniumbase ddddocr PyAutoGUI
 
-      - name: 🚀 智能解析全协议节点并启动代理内核
-        env:
-          PROXY: ${{ secrets.PROXY }}
-          # 【修复核心】将整段 Python 代码存为名为 PY_SCRIPT 的环境变量，完美避开缩进冲突！
-          PY_SCRIPT: |
-            import os, sys, json, base64
-            from urllib.parse import urlparse, parse_qs
-
-            link = os.environ.get('PROXY', '').strip()
-            if not link:
-                print("❌ 错误：环境变量 PROXY 为空！")
-                sys.exit(1)
-
-            config = {
-                "log": {"loglevel": "warning"},
-                "inbounds": [{
-                    "port": 10808,
-                    "listen": "127.0.0.1",
-                    "protocol": "socks",
-                    "settings": {"udp": True}
-                }],
-                "outbounds": []
-            }
-
-            outbound = {"protocol": "", "settings": {}, "streamSettings": {}}
-
-            def decode_b64(s):
-                s = s.replace('-', '+').replace('_', '/')
-                s += "=" * ((4 - len(s) % 4) % 4)
-                return base64.b64decode(s).decode('utf-8')
-
-            try:
-                if link.startswith("vmess://"):
-                    outbound["protocol"] = "vmess"
-                    v_json = json.loads(decode_b64(link[8:]))
-                    outbound["settings"] = {"vnext": [{"address": v_json.get("add", ""), "port": int(v_json.get("port", 443)), "users": [{"id": v_json.get("id", ""), "alterId": int(v_json.get("aid", 0)), "security": v_json.get("scy", "auto")}]}]}
-                    net = v_json.get("net", "tcp")
-                    outbound["streamSettings"]["network"] = net
-                    if net == "ws":
-                        outbound["streamSettings"]["wsSettings"] = {"path": v_json.get("path", "/"), "headers": {"Host": v_json.get("host", "")} if v_json.get("host") else {}}
-                    if v_json.get("tls") == "tls":
-                        outbound["streamSettings"]["security"] = "tls"
-                        outbound["streamSettings"]["tlsSettings"] = {"serverName": v_json.get("sni", "") or v_json.get("add", "")}
-                        
-                elif link.startswith("vless://") or link.startswith("trojan://"):
-                    parsed = urlparse(link)
-                    proto = parsed.scheme
-                    outbound["protocol"] = proto
-                    uuid_or_pass = parsed.username or ""
-                    host = parsed.hostname or ""
-                    port = parsed.port or 443
-                    qs = parse_qs(parsed.query) 
-                    
-                    if proto == "vless":
-                        outbound["settings"] = {"vnext": [{"address": host, "port": port, "users": [{"id": uuid_or_pass, "encryption": qs.get("encryption", ["none"])[0]}]}]}
-                    else:
-                        outbound["settings"] = {"servers": [{"address": host, "port": port, "password": uuid_or_pass}]}
-                        
-                    net = qs.get("type", ["tcp"])[0]
-                    outbound["streamSettings"]["network"] = net
-                    if net == "ws":
-                        outbound["streamSettings"]["wsSettings"] = {"path": qs.get("path", ["/"])[0], "headers": {"Host": qs.get("host", [""])[0]} if qs.get("host") else {}}
-                        
-                    security = qs.get("security", ["none"])[0]
-                    if security in ["tls", "reality"]:
-                        outbound["streamSettings"]["security"] = security
-                        outbound["streamSettings"][f"{security}Settings"] = {"serverName": qs.get("sni", [""])[0] or host}
-                        if security == "reality":
-                            outbound["streamSettings"]["realitySettings"] = {"publicKey": qs.get("pbk", [""])[0], "shortId": qs.get("sid", [""])[0], "fingerprint": qs.get("fp", ["chrome"])[0]}
-
-                elif link.startswith("socks5://"):
-                    outbound["protocol"] = "socks"
-                    parsed = urlparse(link)
-                    server = {"address": parsed.hostname, "port": parsed.port or 1080}
-                    if parsed.username:
-                        server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
-                    outbound["settings"] = {"servers": [server]}
-
-                else:
-                    print(f"❌ 暂不支持自动解析此协议: {link[:10]}...")
-                    sys.exit(1)
-
-                config["outbounds"].append(outbound)
-                with open("config.json", "w", encoding="utf-8") as f:
-                    json.dump(config, f, indent=2)
-                    
-                print(f"✅ 成功将 {link[:8]}... 链接转换为 config.json 配置文件！")
-                
-            except Exception as e:
-                print(f"❌ 解析链接时发生致命错误: {e}")
-                sys.exit(1)
+      - name: 安装并配置 Cloudflare WARP (官方原生 IP 代理)
         run: |
-          # 检查环境变量中是否填写了代理链接
-          if [ -z "$PROXY" ]; then
-              echo "❌ 错误：环境变量 PROXY 为空！"
-              exit 1
-          fi
-
-          # ==========================================
-          # 分支 1：处理 Hysteria2 协议 (hy2:// 或 hysteria2://)
-          # ==========================================
-          if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
-              
-              (
-                set -e
-                wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
-                chmod +x hysteria
-              ) > hysteria_setup.log 2>&1 || {
-                echo "❌ Hysteria 下载失败，详细日志如下："
-                cat hysteria_setup.log
-                exit 1
-              }
-              
-              AUTH=$(echo "$PROXY" | sed -n 's|.*://\([^@]*\)@.*|\1|p' || true)
-              SERVER=$(echo "$PROXY" | sed -n 's|.*@\([^/?#]*\).*|\1|p' || true)
-              SNI=$(echo "$PROXY" | grep -oP 'sni=\K[^&#]*' || true)
-              
-              echo "server: $SERVER" > config.yaml
-              echo "auth: $AUTH" >> config.yaml
-              echo "tls:" >> config.yaml
-              echo "  sni: $SNI" >> config.yaml
-              echo "  insecure: true" >> config.yaml
-              echo "socks5:" >> config.yaml
-              echo "  listen: 127.0.0.1:10808" >> config.yaml
-              
-              echo "✅ 成功将 Hysteria2 链接转换为 config.yaml 配置文件！"
-              
-              nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
-              
-          # ==========================================
-          # 分支 2：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
-          # ==========================================
-          else
-              (
-                set -e
-                wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-                unzip Xray-linux-64.zip -x README.md
-                chmod +x xray
-              ) > xray_setup.log 2>&1 || {
-                echo "❌ Xray 下载或解压失败，详细日志如下："
-                cat xray_setup.log
-                exit 1
-              }
-              
-              # 【修复核心】安全地将存放在环境变量中的 Python 代码输出为实体文件
-              printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
-              
-              # 运行 Python 解析脚本
-              python -u parse_proxy.py
-              
-              # 后台静默启动 Xray
-              nohup ./xray run -c config.json > proxy.log 2>&1 &
-          fi
+          # 1. 导入 Cloudflare 官方 GPG 密钥，用于验证软件源的安全性
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           
-          # 等待 5 秒建连
+          # 2. 将 Cloudflare 官方软件源添加到 Ubuntu 系统的列表中
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          
+          # 3. 更新系统软件源，并静默安装 WARP 客户端
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+          
+          # 4. 注册免费的 WARP 虚拟账户 (自动接受服务条款)
+          sudo warp-cli --accept-tos registration new
+          
+          # 5. 设置为 Proxy 代理模式 (将生成一个本地 SOCKS5 端口，防止接管全局网络导致 Actions 断网)
+          sudo warp-cli --accept-tos mode proxy
+          
+          # 6. 绑定本地 SOCKS5 代理端口为 10808 (与后面的 Python 脚本环境变量完美对接)
+          sudo warp-cli --accept-tos proxy port 10808
+          
+          # 7. 启动连接，接入 Cloudflare 网络
+          sudo warp-cli --accept-tos connect
+          
+          # 等待 5 秒钟，确保底层网络通道建立成功
           sleep 5
 
-      - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
+      - name: 运行自动化脚本 (虚拟屏幕 + WARP 代理)
         env:
+          # 读取你在 Secrets 中配置的账号密码
           acount: ${{ secrets.ACOUNT }}
+          # 强制全局通过刚刚配置好的 WARP 官方本地代理端口 (10808) 访问外部网络
           HTTP_PROXY: socks5://127.0.0.1:10808
           HTTPS_PROXY: socks5://127.0.0.1:10808
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          (
-            set -e
-            curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
-          ) > curl_test.log 2>&1 || { 
-            echo "❌ 代理连接失败！为您提取底层日志："; 
-            echo "================ 代理核心运行日志 ================";
-            cat proxy.log;
-            echo "====================================================";
-            exit 1; 
-          }
+          # 验证代理内核是否能正常获取到 Cloudflare 的真实高信任度 IP
+          echo ">>> 正在检测当前 WARP 代理节点的公网 IP 信息..."
+          curl -sS -x socks5://127.0.0.1:10808 https://ipinfo.io || echo "❌ 获取 IP 信息失败"
+          echo "------------------------------------------------"
           
-          (
-            set -e
-            sudo apt-get update
-            sudo apt-get install -y xvfb fonts-noto-cjk
-          ) > apt_install.log 2>&1 || {
-            echo "❌ 虚拟屏幕和字体安装失败，详细日志如下："
-            cat apt_install.log
-            exit 1
-          }
+          # 安装虚拟显示器组件（xvfb）和中文字体，确保验证码图片渲染正常
+          sudo apt-get update
+          sudo apt-get install -y xvfb fonts-noto-cjk
           
+          # 启动虚拟屏幕并运行 Python 登录脚本
+          # 添加了 -u 参数以开启无缓冲模式，确保你能实时看到完整的运行日志
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行过程截图与日志文件
